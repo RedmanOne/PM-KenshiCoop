@@ -197,6 +197,7 @@ struct CoopPanelUi {
     bool          f2Down;        // F2 held last tick (rising-edge toggle)
     std::string   lastStatus;    // last status text shown (refresh gate)
     std::string   lastTransfer;  // last save-transfer line shown (refresh gate)
+    std::string   lastDisc;      // last discovery-browser line shown (refresh gate)
     CoopPanelUi()
         : panel(0), open(false), built(false), hostFlag(true), steamFlag(true),
           connectedFlag(false), lastConnected(false), lastChkVal(false),
@@ -210,9 +211,12 @@ DataPanelLine_Button*   g_connBtn      = 0; // Online/Offline toggle (replaces t
 DataPanelLine_Button*   g_slotBtn      = 0; // JOIN squad-slot toggle (protocol 49)
 DataPanelLine_Button*   g_copyIdBtn    = 0;
 DataPanelLine_Button*   g_pasteIdBtn   = 0; // "Paste friend's Steam ID" from clipboard
+DataPanelLine_Button*   g_scanBtn      = 0; // JOIN+UDP: scan tailnet / next found host
 DataPanelLine*          g_debugLine    = 0; // white connection-status debug row
+DataPanelLine*          g_discLine     = 0; // white "Found hosts" browser row
 DataPanelLine*          g_peerLine     = 0; // white "Friend's Steam ID" row
 DataPanelLine*          g_selfLine     = 0; // white "Your Steam ID" row
+bool                    g_scanClicked  = false; // Scan pressed; dispatched in tick
 std::string             g_selfIdStr;   // self SteamID as digits (set each tick; "" = none)
 
 // Friend SteamIDs pasted in-panel this session (protocol 49: a HOST may hold
@@ -260,6 +264,13 @@ void onSlotBtn(DataPanelLine*) {
     _snprintf(b, sizeof(b) - 1, "[coop-ui] squad slot -> %u", g_slotChoice);
     b[sizeof(b) - 1] = '\0';
     coop::logLine(b);
+}
+// Scan for hosts (JOIN + UDP): the actual scan/cycle logic lives in the plugin
+// root (it owns the discovery module + config); the GUI only reports the press.
+void onScanBtn(DataPanelLine*) {
+    g_scanClicked = true;
+    g_panel.needsRebuild = true;
+    coop::logLine("[coop-ui] scan for hosts pressed");
 }
 // Copy the player's own SteamID to the clipboard so they can paste it to a friend
 // (who pastes it into their panel via "Paste friend's Steam ID").
@@ -314,6 +325,8 @@ struct PanelStrings {
     const std::string *title, *roleKey, *roleCap, *transKey, *transCap;
     const std::string *connKey, *connCap;
     const std::string *slotKey, *slotCap;
+    const std::string *scanKey, *scanCap;   // null = no Scan button (HOST/Steam)
+    const std::string *discKey, *discVal;   // null = no browser row (nothing to show)
     const std::string *dbgKey, *dbgVal;
     const std::string *peerKey, *peerVal, *pasteKey, *pasteCap;
     const std::string *selfKey, *selfVal, *copyKey, *copyCap;
@@ -331,6 +344,13 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         g_slotBtn = 0;
         if (s->slotKey && s->slotCap)
             g_slotBtn = p->setLineButton(*s->slotKey, *s->slotCap, 0);
+        // JOIN + UDP: the tailnet/LAN game browser (scan + picked-host row).
+        g_scanBtn = 0;
+        if (s->scanKey && s->scanCap)
+            g_scanBtn = p->setLineButton(*s->scanKey, *s->scanCap, 0);
+        g_discLine = 0;
+        if (s->discKey && s->discVal)
+            g_discLine = p->setLine(*s->discKey, *s->discVal, *s->empty, 0, false, true);
         p->addSpace(0, 0.35f);
         // Connection-status debug line (coloured white below, outside SEH).
         g_debugLine = p->setLine(*s->dbgKey, *s->dbgVal, *s->empty, 0, false, true);
@@ -386,7 +406,7 @@ void panelDestroySeh(ForgottenGUI* g, DatapanelGUI* p) {
 } // namespace
 
 void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
-                   CoopDisconnectFn onDisconnect) {
+                   CoopDisconnectFn onDisconnect, CoopScanFn onScan) {
     if (!st) return;
     ForgottenGUI* g = ::gui; // KenshiLib data export (spike 46)
     { static void* s_last = (void*)-1;
@@ -422,8 +442,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             g_panel.panel = 0; g_panel.built = false;
             g_roleBtn = 0; g_transBtn = 0; g_connBtn = 0; g_slotBtn = 0;
             g_copyIdBtn = 0;
-            g_pasteIdBtn = 0;
-            g_debugLine = 0; g_peerLine = 0; g_selfLine = 0;
+            g_pasteIdBtn = 0; g_scanBtn = 0;
+            g_debugLine = 0; g_discLine = 0; g_peerLine = 0; g_selfLine = 0;
             g_panel.open = false;
             coop::logLine("[coop-ui] panel closed");
         }
@@ -452,13 +472,20 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
                                                : std::string();
     if (transfer != g_panel.lastTransfer) g_panel.needsRebuild = true;
 
+    // Discovery-browser line: rebuild when the scan status / pick changes.
+    std::string discDetail = st->discDetail ? std::string(st->discDetail)
+                                            : std::string();
+    if (discDetail != g_panel.lastDisc) g_panel.needsRebuild = true;
+
     // Create the window once (outside SEH - see the header note on C2712).
     // Layer MUST be "Info": spike 48 proved createFloatingLabel renders non-null
     // there. "Windows" is not a visible MyGUI layer here - the panel is minted
     // and armed but attaches to nothing, so F2 logs open/close yet nothing draws.
     if (!g_panel.panel) {
         std::string layer = "Info";
-        g_panel.panel = g->createDatapanel(0.22f, 0.30f, 0.30f, 0.44f, false, layer, true);
+        // Height covers the tallest variant: JOIN+UDP adds the squad-slot,
+        // Scan and Found-hosts rows on top of the host layout.
+        g_panel.panel = g->createDatapanel(0.22f, 0.28f, 0.30f, 0.50f, false, layer, true);
         g_panel.built = false;
         if (!g_panel.panel) {
             coop::logErrLine("[coop-ui] createDatapanel FAILED");
@@ -485,6 +512,15 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             sc[sizeof(sc) - 1] = '\0';
             slotCap = sc;
         }
+
+        // JOIN + UDP: the tailnet/LAN game browser. The button doubles as
+        // scan-and-cycle; the row shows the scan status / picked host.
+        bool showScan = (!g_panel.hostFlag && !g_panel.steamFlag);
+        std::string scanKey = "scan";
+        std::string scanCap = discDetail.empty()
+            ? "Scan for hosts (Tailscale / LAN)"
+            : "Scan for hosts    (next / rescan)";
+        std::string discKey = "Found hosts";
 
         // White debug line: describes the live connection state + type. Reflects
         // the ACTUAL running session when online; the armed toggles when offline.
@@ -552,6 +588,10 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         ps.connKey = &connKey; ps.connCap = &connCap;
         ps.slotKey = g_panel.hostFlag ? 0 : &slotKey;
         ps.slotCap = g_panel.hostFlag ? 0 : &slotCap;
+        ps.scanKey = showScan ? &scanKey : 0;
+        ps.scanCap = showScan ? &scanCap : 0;
+        ps.discKey = (showScan && !discDetail.empty()) ? &discKey : 0;
+        ps.discVal = (showScan && !discDetail.empty()) ? &discDetail : 0;
         ps.dbgKey = &dbgKey; ps.dbgVal = &dbgVal;
         ps.peerKey = &peerKey; ps.peerVal = &peerVal;
         ps.pasteKey = &pasteKey; ps.pasteCap = &pasteCap;
@@ -569,7 +609,10 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_slotBtn)    g_slotBtn->callback    = MyGUI::newDelegate(&onSlotBtn);
         if (g_copyIdBtn)  g_copyIdBtn->callback  = MyGUI::newDelegate(&onCopyIdBtn);
         if (g_pasteIdBtn) g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
+        if (g_scanBtn)    g_scanBtn->callback    = MyGUI::newDelegate(&onScanBtn);
         dbgColourSeh(g_debugLine, !transfer.empty()); // amber while streaming
+        // Browser row: amber while a scan is in flight, white once it settled.
+        dbgColourSeh(g_discLine, discDetail.compare(0, 8, "Scanning") == 0);
         dbgColourSeh(g_peerLine, false);
         dbgColourSeh(g_selfLine, false);
 
@@ -577,6 +620,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         g_panel.needsRebuild = false;
         g_panel.lastStatus = detail;
         g_panel.lastTransfer = transfer;
+        g_panel.lastDisc = discDetail;
     }
 
     // Connect / disconnect on the Online/Offline toggle edge (edge, not level, so
@@ -601,6 +645,12 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             coop::logLine("[coop-ui] DISCONNECT requested");
             if (onDisconnect) onDisconnect();
         }
+    }
+
+    // Scan button press -> plugin root (scan or step to the next found host).
+    if (g_scanClicked) {
+        g_scanClicked = false;
+        if (onScan) onScan();
     }
 }
 

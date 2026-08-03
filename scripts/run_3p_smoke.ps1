@@ -169,6 +169,13 @@ function Set-CoopEnv {
     # entity batches from BOTH peers (host: both joins; each join: the host AND
     # the other join via relay) so the three windows overlap.
     $env:KENSHICOOP_ARM_MIN_PEERS  = if ($Scenario -ne "") { "2" } else { "1" }
+    # Tailnet/LAN discovery: the host's responder answers on the dedicated
+    # disc port (27815 - clear of the netsim proxies on Port+1/+2); each JOIN
+    # fires one automatic scan ~10 s in and logs what it found, so the rig
+    # proves the probe->reply round trip end to end (loopback candidates; the
+    # tailscale CLI is absent on the rig and the scan says so).
+    $env:KENSHICOOP_DISC           = "1"
+    $env:KENSHICOOP_DISC_AUTOSCAN  = if ($Mode -eq "join") { "1" } else { "0" }
     $env:KENSHICOOP_FAKE_CLOCK_SKEW_MS = "0"
     $env:KENSHICOOP_NETSIM_DELAY_MS = "0"
     $env:KENSHICOOP_NETSIM_JITTER_MS = "0"
@@ -285,6 +292,12 @@ Gate "no 'not joinable'"           $hostLog "not joinable"            $false
 foreach ($pair in @(@("host", $hostLog), @("join1", $join1Log), @("join2", $join2Log))) {
     Gate "no protocol mismatch ($($pair[0]))" $pair[1] "protocol mismatch" $false
 }
+# Tailnet/LAN discovery round trip (loopback): the host's responder must come
+# up and answer, and each join's autoscan must find exactly the host.
+Gate "host discovery responder up"    $hostLog  "\[disc\] responder up on udp"
+Gate "host answered a probe"          $hostLog  "\[disc\] reply -> 127\.0\.0\.1"
+Gate "join1 scan found the host"      $join1Log "\[disc\] scan done: .*found=[1-9]"
+Gate "join2 scan found the host"      $join2Log "\[disc\] scan done: .*found=[1-9]"
 
 if ($Scenario -ne "") {
     Write-Host "`n== 3-player scenario gates ($Scenario) =="

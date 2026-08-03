@@ -104,6 +104,19 @@ the host's address in `"ip"` / `"port"`. Then in the panel set **Transport: UDP*
 and go ONLINE. The `ip`/`port` are re-read whenever you go ONLINE, so no restart
 is needed after an edit.
 
+**Tailscale (recommended for friends over the internet on UDP):** put everyone
+in one [tailscale](https://tailscale.com) network and you get LAN-grade UDP
+between machines with **no port forwarding** (it's a flat WireGuard mesh).
+With **Role: JOIN** and **Transport: UDP**, click **"Scan for hosts
+(Tailscale / LAN)"** in the F2 panel: it probes every machine in your tailnet
+(plus the local network) and lists whoever is hosting - name, address, save,
+and player count. Click the button again to step through multiple found hosts;
+the picked one is what ONLINE connects to, no config editing or address typing
+needed. Scanning uses the `tailscale` CLI if installed; without it you can
+still join by pasting the host's `100.x.y.z` address into the config as above.
+The host answers scan probes only from private/tailnet addresses - it never
+advertises to the open internet.
+
 ### Good to know
 
 - **You each control your own squad.** With one squad tab per player, the host

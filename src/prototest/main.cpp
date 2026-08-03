@@ -24,6 +24,7 @@
 #include <cstring>
 
 #include "../netproto/Wire.h"
+#include "../netproto/Discovery.h"
 #include "../netproto/ContentHash.h"
 #include "../plugin/sync/Interp.h"
 #include "../plugin/core/OwnRanks.h"
@@ -1617,6 +1618,106 @@ static void testChangeGate() {
           gateShouldSend(true, 80001, 80000, 0, 10000, false));
 }
 
+static void testDiscovery() {
+    std::printf("\n== discovery datagrams + tailnet extraction ==\n");
+    using namespace coop::disc;
+
+    // --- probe round trip + rejects ------------------------------------------
+    {
+        coop::u8 buf[64];
+        unsigned int n = encodeProbe(buf);
+        CHECK_EQ("probe size", n, sizeof(DiscProbe));
+        coop::u32 proto = 0;
+        CHECK("probe parses", parseProbe(buf, n, &proto));
+        CHECK_EQ("probe carries protocol", proto, PROTOCOL_VERSION);
+        CHECK("probe short rejected", !parseProbe(buf, n - 1, &proto));
+        buf[0] ^= 0xFF;
+        CHECK("probe bad magic rejected", !parseProbe(buf, n, &proto));
+    }
+
+    // --- reply round trip: truncation + forced NULs ---------------------------
+    {
+        coop::u8 buf[128];
+        unsigned int n = encodeReply(buf, 27800, 2, (coop::u8)coop::MAX_PLAYERS,
+                                     "BENS-PC", "squad3");
+        CHECK_EQ("reply size", n, sizeof(DiscReply));
+        DiscReply r;
+        CHECK("reply parses", parseReply(buf, n, &r));
+        CHECK_EQ("reply protocol", r.protocol, PROTOCOL_VERSION);
+        CHECK_EQ("reply gamePort", r.gamePort, 27800);
+        CHECK_EQ("reply players", r.players, 2);
+        CHECK_EQ("reply maxPlayers", r.maxPlayers, coop::MAX_PLAYERS);
+        CHECK("reply hostName", std::strcmp(r.hostName, "BENS-PC") == 0);
+        CHECK("reply saveName", std::strcmp(r.saveName, "squad3") == 0);
+        CHECK("reply short rejected", !parseReply(buf, n - 1, &r));
+        buf[0] ^= 0xFF;
+        CHECK("reply bad magic rejected", !parseReply(buf, n, &r));
+
+        // An oversized name truncates and stays NUL-terminated.
+        const char* longName =
+            "this-name-is-way-longer-than-thirty-two-characters-total";
+        n = encodeReply(buf, 27800, 1, 3, longName, "");
+        CHECK("long-name reply parses", parseReply(buf, n, &r));
+        CHECK_EQ("long name truncated", std::strlen(r.hostName), DISC_NAME_MAX - 1);
+        CHECK("empty save ok", r.saveName[0] == '\0');
+
+        // A sender that fills the name field with no NUL must not overrun:
+        // hostName sits at offset 12 (4+4+2+1+1); stomp all 32 bytes with 'A'.
+        std::memset(buf + 12, 'A', DISC_NAME_MAX);
+        CHECK("reply forces name NUL", parseReply(buf, (unsigned)sizeof(DiscReply), &r) &&
+                                       std::strlen(r.hostName) == DISC_NAME_MAX - 1);
+    }
+
+    // --- source-address gate: private scopes only -----------------------------
+    {
+        // helper: dotted quad -> host-order u32
+        #define IP4(a,b,c,d) ((coop::u32)(((a)<<24)|((b)<<16)|((c)<<8)|(d)))
+        CHECK("allow loopback",      ipv4SourceAllowed(IP4(127,0,0,1)));
+        CHECK("allow 10/8",          ipv4SourceAllowed(IP4(10,1,2,3)));
+        CHECK("allow 172.16/12 low", ipv4SourceAllowed(IP4(172,16,0,1)));
+        CHECK("allow 172.16/12 high",ipv4SourceAllowed(IP4(172,31,255,1)));
+        CHECK("deny 172.32",        !ipv4SourceAllowed(IP4(172,32,0,1)));
+        CHECK("allow 192.168/16",    ipv4SourceAllowed(IP4(192,168,1,50)));
+        CHECK("deny 192.169",       !ipv4SourceAllowed(IP4(192,169,1,50)));
+        CHECK("allow tailscale low", ipv4SourceAllowed(IP4(100,64,0,1)));
+        CHECK("allow tailscale high",ipv4SourceAllowed(IP4(100,127,255,254)));
+        CHECK("deny 100.128",       !ipv4SourceAllowed(IP4(100,128,0,1)));
+        CHECK("deny 100.63",        !ipv4SourceAllowed(IP4(100,63,255,254)));
+        CHECK("allow link-local",    ipv4SourceAllowed(IP4(169,254,10,10)));
+        CHECK("deny public 8.8",    !ipv4SourceAllowed(IP4(8,8,8,8)));
+        CHECK("deny public 51.x",   !ipv4SourceAllowed(IP4(51,15,20,25)));
+        #undef IP4
+    }
+
+    // --- tailscale status --json IPv4 extraction ------------------------------
+    {
+        // Shape of the real CLI output: Self + Peer objects, each with a
+        // TailscaleIPs array holding one v4 and one v6 address.
+        std::string json =
+            "{\"Version\":\"1.66.0\",\"Self\":{\"HostName\":\"my-pc\","
+            "\"TailscaleIPs\":[\"100.101.102.103\",\"fd7a:115c:a1e0::1\"]},"
+            "\"Peer\":{\"key1\":{\"HostName\":\"buddy-1\","
+            "\"TailscaleIPs\":[\"100.90.80.70\",\"fd7a:115c:a1e0::2\"]},"
+            "\"key2\":{\"HostName\":\"buddy-2\","
+            "\"TailscaleIPs\":[\"100.90.80.70\",\"100.66.5.4\"]}}}";
+        std::vector<std::string> ips;
+        extractTailscaleIPv4(json, ips);
+        CHECK_EQ("extract count (v6 skipped, dup dropped)", ips.size(), 3);
+        CHECK("extract self",  ips.size() > 0 && ips[0] == "100.101.102.103");
+        CHECK("extract peer1", ips.size() > 1 && ips[1] == "100.90.80.70");
+        CHECK("extract peer2", ips.size() > 2 && ips[2] == "100.66.5.4");
+
+        std::vector<std::string> none;
+        extractTailscaleIPv4("{\"BackendState\":\"NeedsLogin\"}", none);
+        CHECK_EQ("extract none from loginless json", none.size(), 0);
+        extractTailscaleIPv4("", none);
+        CHECK_EQ("extract none from empty", none.size(), 0);
+        // Malformed tail (no closing bracket) must not loop or crash.
+        extractTailscaleIPv4("\"TailscaleIPs\":[\"100.1.2.3\"", none);
+        CHECK_EQ("extract tolerates unterminated array", none.size(), 0);
+    }
+}
+
 int main() {
     std::printf("prototest: KenshiCoop wire/hash/interp unit layer (protocol v%u)\n",
                 (unsigned)PROTOCOL_VERSION);
@@ -1626,6 +1727,7 @@ int main() {
     testEngineCaps();
     testChangeGate();
     testRoundTrips();
+    testDiscovery();
     testFraming();
     testSaveCrc();
     testFolderFingerprint();

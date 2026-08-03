@@ -16,6 +16,18 @@ struct Config {
     bool          isHost;          // KENSHICOOP_MODE != "join"
     std::string   ip;              // KENSHICOOP_IP   (join target)
     int           port;            // KENSHICOOP_PORT
+    // Tailnet/LAN game discovery (KENSHICOOP_DISC / json "discovery", default
+    // ON): a UDP-transport host answers browser probes on discPort
+    // (KENSHICOOP_DISC_PORT / "discPort", default 27815 - deliberately NOT
+    // gamePort+1, where the harness parks its netsim WAN proxies); a JOIN's
+    // panel Scan probes loopback + every tailscale peer. The responder only
+    // ever answers private-scope sources (netproto/Discovery.h gate).
+    bool          discovery;
+    int           discPort;
+    bool          discAutoScan;    // KENSHICOOP_DISC_AUTOSCAN (harness): a JOIN
+                                   // fires one scan on its own shortly after
+                                   // startup and logs the results - lets the
+                                   // loopback rig prove probe->reply end to end.
     std::string   save;            // KENSHICOOP_SAVE (auto-load; empty = manual)
     int           testSeconds;     // KENSHICOOP_TEST_SECONDS (0 = no self-exit)
     std::string   logPath;         // KENSHICOOP_LOG

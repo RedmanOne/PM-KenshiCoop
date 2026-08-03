@@ -31,6 +31,7 @@
 #include "core/OwnRanks.h"
 #include "core/Inbound.h"
 #include "net/NetLink.h"
+#include "net/Discovery.h"
 #include "net/SteamP2P.h"
 #include "net/SteamInvite.h"
 #include "game/Engine.h"
@@ -796,6 +797,122 @@ void driveLoadSync(GameWorld* gw) {
     }
 }
 
+// ---- Tailnet/LAN discovery browser (panel-side state) -------------------------
+// The Scan button's session state: which scanned host is currently picked. The
+// pick survives coopUiConnect's config-file reload (session-scoped, exactly like
+// panel-pasted Steam IDs) so ONLINE connects to the scanned host.
+struct DiscSel {
+    bool           valid;
+    char           ip[64];
+    unsigned short port;
+    DiscSel() : valid(false), port(0) { ip[0] = '\0'; }
+};
+DiscSel      g_discSel;
+int          g_discPick    = -1;    // index into the scan results (-1 = none)
+unsigned int g_discSeenGen = 0;     // last scan generation consumed by the tick
+bool         g_discApply   = false; // auto-pick result 0 when the UI scan lands
+std::string  g_discDetail;          // browser status line shown in the panel
+bool         g_discAutoScanFired = false; // harness: one-shot self-scan latch
+
+// Adopt scan result g_discPick: remember it for coopUiConnect and surface it in
+// the config so the choice is immediate and visible.
+void applyDiscPick() {
+    coop::disc::FoundHost fh;
+    if (g_discPick < 0 || !coop::disc::foundGet((unsigned int)g_discPick, &fh)) return;
+    strncpy(g_discSel.ip, fh.ip, sizeof(g_discSel.ip) - 1);
+    g_discSel.ip[sizeof(g_discSel.ip) - 1] = '\0';
+    g_discSel.port  = fh.info.gamePort;
+    g_discSel.valid = true;
+    g_cfg.ip   = g_discSel.ip;
+    g_cfg.port = g_discSel.port;
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[disc] selected host '%s' %s:%u (v%u %u/%u save='%s')",
+              fh.info.hostName, fh.ip, (unsigned)fh.info.gamePort,
+              fh.info.protocol, fh.info.players, fh.info.maxPlayers,
+              fh.info.saveName);
+    b[sizeof(b) - 1] = '\0';
+    coopLog(b);
+}
+
+// Panel Scan button (JOIN + UDP): first click scans; further clicks step
+// through the found hosts; wrapping back to the first also refreshes the list
+// in the background (so a host that went up/down since the scan shows up).
+void coopUiScan() {
+    if (coop::disc::scanBusy()) { coopLog("[disc] scan already running"); return; }
+    unsigned int n = coop::disc::foundCount();
+    if (n > 0 && g_discSeenGen == coop::disc::scanGeneration() && g_discPick >= 0) {
+        g_discPick = (g_discPick + 1) % (int)n;
+        applyDiscPick();
+        if (g_discPick == 0)
+            coop::disc::scanStart((unsigned short)g_cfg.discPort); // silent refresh
+    } else {
+        g_discApply = true;
+        coop::disc::scanStart((unsigned short)g_cfg.discPort);
+    }
+}
+
+// Discovery tick: runs in BOTH interactive and harness modes (the panel drive
+// below is interactive-only). Refreshes the host responder's advert and
+// consumes finished scans; the harness autoscan (KENSHICOOP_DISC_AUTOSCAN)
+// fires one join-side scan ~10 s after startup so the loopback rig proves the
+// probe->reply round trip end to end from the logs alone.
+void tickDiscovery() {
+    if (coop::disc::responderRunning())
+        coop::disc::responderAdvert((unsigned short)g_cfg.port,
+                                    1 + (unsigned int)g_peersPresent.size(),
+                                    coop::MAX_PLAYERS, g_cfg.save.c_str());
+
+    if (g_cfg.discAutoScan && !g_cfg.isHost && !g_discAutoScanFired) {
+        static DWORD s_first = 0;
+        if (s_first == 0) s_first = GetTickCount();
+        if (GetTickCount() - s_first >= 10000) {
+            g_discAutoScanFired = true;
+            coop::disc::scanStart((unsigned short)g_cfg.discPort); // log-only
+        }
+    }
+
+    // Consume a finished scan: adopt result 0 for a UI-initiated scan, clamp a
+    // stale pick, and rebuild the panel status line.
+    unsigned int gen = coop::disc::scanGeneration();
+    if (gen != g_discSeenGen) {
+        g_discSeenGen = gen;
+        unsigned int n = coop::disc::foundCount();
+        if (g_discApply) {
+            g_discApply = false;
+            g_discPick = (n > 0) ? 0 : -1;
+            if (g_discPick >= 0) applyDiscPick();
+        } else if (g_discPick >= (int)n) {
+            g_discPick = (n > 0) ? 0 : -1;
+        }
+    }
+    if (coop::disc::scanBusy()) {
+        g_discDetail = "Scanning Tailscale + loopback...";
+    } else if (g_discSeenGen == 0) {
+        g_discDetail.clear(); // never scanned - the button caption is the hint
+    } else {
+        unsigned int n = coop::disc::foundCount();
+        if (n == 0) {
+            g_discDetail = "No hosts found - the host must be ONLINE over UDP";
+            if (!coop::disc::lastScanSawTailscale())
+                g_discDetail += " (no tailscale CLI: loopback/LAN only)";
+        } else {
+            coop::disc::FoundHost fh;
+            if (g_discPick >= 0 && coop::disc::foundGet((unsigned int)g_discPick, &fh)) {
+                char b[192];
+                _snprintf(b, sizeof(b) - 1, "[%d/%u] %s @ %s:%u  save=%s  %u/%u%s",
+                          g_discPick + 1, n, fh.info.hostName, fh.ip,
+                          (unsigned)fh.info.gamePort,
+                          fh.info.saveName[0] ? fh.info.saveName : "?",
+                          fh.info.players, fh.info.maxPlayers,
+                          fh.info.protocol == coop::PROTOCOL_VERSION
+                              ? "" : "  [PROTOCOL MISMATCH]");
+                b[sizeof(b) - 1] = '\0';
+                g_discDetail = b;
+            }
+        }
+    }
+}
+
 // Co-op session panel (F2) + status overlay. Interactive sessions only - the
 // unattended harness (scenario / self-exit timer) never touches the panel, and
 // keeping the GUI stack out of those runs avoids perturbing the scenario
@@ -806,6 +923,9 @@ void driveLoadSync(GameWorld* gw) {
 // mainLoop_hook and the title-screen titleUpdate_hook so a join can go ONLINE
 // (and copy/paste Steam IDs) straight from the main menu.
 void coopPanelDrive(GameWorld* gw) {
+    // Discovery ticks in EVERY mode (the harness autoscan + responder advert
+    // must run without the panel); the panel below stays interactive-only.
+    tickDiscovery();
     if (!(g_cfg.scenario.empty() && g_cfg.testSeconds == 0)) return;
     coop::engine::CoopPanelState ps;
     ps.selfSteamId  = (unsigned long long)coop::steamp2p::selfId();
@@ -862,11 +982,14 @@ void coopPanelDrive(GameWorld* gw) {
     }
     ps.transferDetail = transfer.empty() ? (const char*)0 : transfer.c_str();
 
+    // Tailnet/LAN browser line (join+UDP): scan progress / the picked host.
+    ps.discDetail = g_discDetail.empty() ? (const char*)0 : g_discDetail.c_str();
+
     // Still pump Steam callbacks so an inbound "Join Game" (a friend inviting
     // US) can fire coopUiConnect; the outbound invite/picker UI is gone.
     coop::steaminvite::tick();
 
-    coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect);
+    coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect, &coopUiScan);
     coop::engine::coopOverlayTick(gw, detail.c_str(), ostate, g_net.isRunning());
 }
 
@@ -1784,6 +1907,16 @@ void startNetworking() {
     if (g_cfg.isHost) {
         coopLog("KenshiCoop: starting as HOST");
         ok = g_net.startHost(g_cfg.port, &g_inbound);
+        // Tailnet/LAN game browser: a UDP host answers discovery probes on the
+        // dedicated port so joins can Scan instead of typing an address. Steam
+        // transport skips it (the advertised UDP endpoint would be meaningless);
+        // a bind failure (second host on this machine) only disables discovery.
+        if (ok && g_cfg.discovery && g_cfg.transport != "steam") {
+            if (coop::disc::responderStart((unsigned short)g_cfg.discPort))
+                coop::disc::responderAdvert((unsigned short)g_cfg.port,
+                                            1 + (unsigned int)g_peersPresent.size(),
+                                            coop::MAX_PLAYERS, g_cfg.save.c_str());
+        }
     } else {
         // Protocol 49: carry our squad-slot claim in HELLO so the host can
         // enforce slot uniqueness (and evict our own crash ghost on rejoin).
@@ -1804,6 +1937,7 @@ void startNetworking() {
 // the Replicator/Inbound session state is reset for a clean handshake).
 void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds,
                    unsigned int peerCount, unsigned int ownRank) {
+    coop::disc::responderStop(); // startNetworking re-arms it for a UDP host
     if (g_net.isRunning()) g_net.stop();
     coop::steamp2p::shutdown();
     // World is live here (reconnect from within a running game): despawn minted
@@ -1816,6 +1950,19 @@ void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds
     // hitting Connect works without restarting the game. (It also picks up
     // steamPeer(s)/ownRank if set for advanced/back-compat use.)
     coop::reloadPeerFromFile(g_cfg);
+    // A host picked from the discovery Scan this session WINS over the config
+    // file (same precedent as panel-pasted Steam IDs): re-apply it after the
+    // reload so hitting ONLINE connects to the scanned host, not the stale
+    // coop_config.json endpoint. Session-scoped; never written to disk.
+    if (!isHost && !useSteam && g_discSel.valid) {
+        g_cfg.ip   = g_discSel.ip;
+        g_cfg.port = g_discSel.port;
+        char db[128];
+        _snprintf(db, sizeof(db) - 1, "[disc] connecting to scanned host %s:%u",
+                  g_discSel.ip, (unsigned)g_discSel.port);
+        db[sizeof(db) - 1] = '\0';
+        coopLog(db);
+    }
     // Steam IDs pasted in the F2 panel this session win over the config: the
     // normal flow is Copy my Steam ID -> friend Pastes it -> Connect, with no
     // file editing. An empty paste list leaves the config values standing.
@@ -1869,6 +2016,7 @@ void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds
 
 void coopUiDisconnect() {
     coopLog("[coop-ui] disconnect");
+    coop::disc::responderStop();
     if (g_net.isRunning()) g_net.stop();
     coop::steaminvite::reset(); // leave any Steam lobby
     coop::steamp2p::shutdown();

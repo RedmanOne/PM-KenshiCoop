@@ -80,9 +80,18 @@ the vanilla Wanderer start with three wanderers pre-split into three squad
 tabs (ranks 0/1/2 = host / join 1 / join 2). Update the README start-list
 text when it lands.
 
-## Playing a real session today (before 1-3 land)
+## Playing a real session today (before 2-3 land)
 
-Works now, with manual setup:
+Recommended for three friends over the internet: **UDP over Tailscale** - a
+tailnet is a flat WireGuard mesh (no port forwarding, no NAT pain) and it
+sidesteps the one transport that hasn't been live-tested (Steam 3P). Everyone
+joins one tailnet; the host goes ONLINE (Transport UDP); each join presses
+**Scan for hosts (Tailscale / LAN)** in the F2 panel and picks the host from
+the list (the scan probes every tailnet machine on UDP 27815 via the
+`tailscale` CLI; the responder only answers private/tailnet sources). Player 3
+sets Squad slot 2 before going ONLINE, as below.
+
+Steam-transport setup (untested live with 3 machines):
 
 1. **Host**: F2 panel, paste BOTH friends' Steam IDs (or `steamPeers` in
    `coop_config.json`), Role HOST, ONLINE.

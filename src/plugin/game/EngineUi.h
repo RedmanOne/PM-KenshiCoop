@@ -39,6 +39,10 @@ struct CoopPanelState {
     // the F2 panel's status line shows this instead (e.g. "Streaming host
     // world... 42% (3.1/7.4 MB)"). Set by coopPanelDrive, rendered in dbgVal.
     const char*        transferDetail;
+    // Tailnet/LAN browser status (null = never scanned): scan progress, the
+    // currently picked host, or "no hosts found". Rendered as its own white
+    // row above the Scan button; the plugin root owns the scan/pick state.
+    const char*        discDetail;
 };
 // The panel's role/transport selections at the moment Connect is hit.
 // peerIds/peerCount are the Steam IDs pasted in-panel this session (protocol
@@ -50,8 +54,12 @@ typedef void (*CoopConnectFn)(bool isHost, bool useSteam,
                               const unsigned long long* peerIds,
                               unsigned int peerCount, unsigned int ownRank);
 typedef void (*CoopDisconnectFn)();
+// Scan button (JOIN + UDP): first press scans loopback + the tailnet for
+// hosts; further presses step through the results (the plugin root cycles the
+// pick and re-arms the connect endpoint).
+typedef void (*CoopScanFn)();
 void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
-                   CoopDisconnectFn onDisconnect);
+                   CoopDisconnectFn onDisconnect, CoopScanFn onScan);
 
 // Persistent co-op connection-status overlay: a single ScreenLabel tracked to the
 // local leader (the spike-47/48 screenshot-proven render path) whose caption shows

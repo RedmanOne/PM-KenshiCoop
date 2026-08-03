@@ -282,6 +282,18 @@ void loadConfig(Config& c) {
     c.ownRank = (unsigned int)std::atoi(
         envOr("KENSHICOOP_OWN_RANK_CLAIM", fileOr(f, "ownRank", "0").c_str()).c_str());
 
+    // Tailnet/LAN discovery (game browser). Default ON: the responder answers
+    // ONLY private-scope sources (loopback/RFC1918/link-local/Tailscale CGNAT),
+    // so a host never advertises to the open internet.
+    {
+        std::string d = envOr("KENSHICOOP_DISC", fileOr(f, "discovery", "1").c_str());
+        c.discovery = (d == "1" || d == "true");
+        int dp = std::atoi(
+            envOr("KENSHICOOP_DISC_PORT", fileOr(f, "discPort", "27815").c_str()).c_str());
+        c.discPort = (dp > 0 && dp < 65536) ? dp : 27815;
+        c.discAutoScan = envOr("KENSHICOOP_DISC_AUTOSCAN", "0") != "0";
+    }
+
     // In-game panel session control: opt-in legacy auto-start. Default OFF so a
     // panel-driven (env-free) install defers the session to the Connect button;
     // the test harness overrides this in Plugin.cpp (scenario / test-seconds).
