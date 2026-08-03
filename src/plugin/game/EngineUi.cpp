@@ -467,7 +467,13 @@ void coopMenuLauncherTick(ForgottenGUI* g, const CoopPanelState* st) {
     if (st->transferDetail) status = st->transferDetail; // join streaming the world
     if (!g_menuPanel) {
         std::string layer = "Info"; // the render-proven layer (spike 48)
-        g_menuPanel = g->createDatapanel(0.70f, 0.06f, 0.28f, 0.20f, false, layer, true);
+        // createDatapanel takes (TOP, LEFT, width, height) as render-area
+        // fractions - NOT (x, y). Measured on the live title screen
+        // (2026-08-03): args (0.70, 0.06) rendered at top=0.70/left=0.06,
+        // and the F2 panel's (0.22, 0.30) renders at top 0.22, left 0.30.
+        // Top-right corner, clear of the menu buttons (left column) and the
+        // Kenshi logo text.
+        g_menuPanel = g->createDatapanel(0.06f, 0.70f, 0.28f, 0.20f, false, layer, true);
         g_menuBuilt = false;
         if (!g_menuPanel) {
             static bool s_warned = false;
@@ -608,8 +614,10 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     if (!g_panel.panel) {
         std::string layer = "Info";
         // Height covers the tallest variant: JOIN+UDP adds the squad-slot,
-        // Scan and Found-hosts rows on top of the host layout.
-        g_panel.panel = g->createDatapanel(0.22f, 0.28f, 0.30f, 0.50f, false, layer, true);
+        // Scan and Found-hosts rows on top of the host layout. Args are
+        // (TOP, LEFT, width, height) render-area fractions (see the menu
+        // launcher note): top 0.20, left 0.30 - the classic center-left spot.
+        g_panel.panel = g->createDatapanel(0.20f, 0.30f, 0.30f, 0.50f, false, layer, true);
         g_panel.built = false;
         if (!g_panel.panel) {
             coop::logErrLine("[coop-ui] createDatapanel FAILED");
