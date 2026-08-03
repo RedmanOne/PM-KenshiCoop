@@ -811,8 +811,10 @@ DiscSel      g_discSel;
 int          g_discPick    = -1;    // index into the scan results (-1 = none)
 unsigned int g_discSeenGen = 0;     // last scan generation consumed by the tick
 bool         g_discApply   = false; // auto-pick result 0 when the UI scan lands
+bool         g_discAutoJoin = false;// ONE-CLICK JOIN: connect when the scan lands
 std::string  g_discDetail;          // browser status line shown in the panel
 bool         g_discAutoScanFired = false; // harness: one-shot self-scan latch
+bool         g_uiAutoFired       = false; // KENSHICOOP_UI_AUTO one-shot latch
 
 // Adopt scan result g_discPick: remember it for coopUiConnect and surface it in
 // the config so the choice is immediate and visible.
@@ -851,6 +853,38 @@ void coopUiScan() {
     }
 }
 
+// ONE-CLICK launcher actions (the title-screen HOST GAME / JOIN GAME buttons;
+// also driven by the KENSHICOOP_UI_AUTO rehearsal hook - synthetic mouse input
+// never reaches Kenshi, so the flow test presses the same entry point).
+//   HOST: go ONLINE as a UDP host right away; the player then loads a save.
+//   JOIN: scan, and when the scan lands (tickDiscovery below) auto-pick a
+//         protocol-matching host, auto-claim the NEXT FREE squad slot from
+//         the advertised player count (1 player in = slot 1; 2 in = slot 2),
+//         and connect. Steam transport / manual slots stay on the F2 panel.
+void coopUiMenuAction(bool host) {
+    if (host) {
+        if (g_net.isRunning() && g_cfg.isHost) {
+            coopLog("[coop-ui] menu: already hosting");
+            return;
+        }
+        coopLog("[coop-ui] menu: one-click HOST (udp)");
+        coopUiConnect(true, false, 0, 0, 0);
+    } else {
+        if (g_net.isRunning() && !g_cfg.isHost) {
+            coopLog("[coop-ui] menu: already joining/joined (F2 to manage)");
+            return;
+        }
+        if (coop::disc::scanBusy()) {
+            g_discAutoJoin = true; // adopt the scan already in flight
+            return;
+        }
+        coopLog("[coop-ui] menu: one-click JOIN - scanning for hosts");
+        g_discAutoJoin = true;
+        g_discApply    = false;
+        coop::disc::scanStart((unsigned short)g_cfg.discPort);
+    }
+}
+
 // Discovery tick: runs in BOTH interactive and harness modes (the panel drive
 // below is interactive-only). Refreshes the host responder's advert and
 // consumes finished scans; the harness autoscan (KENSHICOOP_DISC_AUTOSCAN)
@@ -877,7 +911,42 @@ void tickDiscovery() {
     if (gen != g_discSeenGen) {
         g_discSeenGen = gen;
         unsigned int n = coop::disc::foundCount();
-        if (g_discApply) {
+        if (g_discAutoJoin) {
+            // ONE-CLICK JOIN: pick the first protocol-matching host, claim the
+            // next free squad slot from the advertised player count, connect.
+            // The advert can be a beat stale (two friends clicking JOIN at
+            // once): the host rejects a doubly-claimed slot LOUDLY, and the
+            // next click rescans with the fresh count.
+            g_discAutoJoin = false;
+            int pick = -1;
+            coop::disc::FoundHost fh;
+            for (unsigned int i = 0; i < n; ++i) {
+                if (coop::disc::foundGet(i, &fh) &&
+                    fh.info.protocol == coop::PROTOCOL_VERSION) { pick = (int)i; break; }
+            }
+            if (pick < 0 && n > 0 && coop::disc::foundGet(0, &fh))
+                pick = 0; // version mismatch: connect anyway - it fails loudly
+            if (pick >= 0 && fh.info.players >= fh.info.maxPlayers) {
+                // The status row shows the n/n count; just don't connect.
+                g_discPick = pick;
+                coopLog("[disc] auto-join refused: session full");
+            } else if (pick >= 0) {
+                g_discPick = pick;
+                applyDiscPick();
+                unsigned int rank = fh.info.players; // host + joins in = next free tab
+                if (rank < 1) rank = 1;
+                if (fh.info.maxPlayers > 1 && rank > (unsigned int)(fh.info.maxPlayers - 1))
+                    rank = fh.info.maxPlayers - 1;
+                char b[128];
+                _snprintf(b, sizeof(b) - 1, "[disc] auto-join '%s' %s:%u slot=%u",
+                          fh.info.hostName, fh.ip, (unsigned)fh.info.gamePort, rank);
+                b[sizeof(b) - 1] = '\0';
+                coopLog(b);
+                coopUiConnect(false, false, 0, 0, rank);
+            }
+            // No hosts found: the status text below says so; the next JOIN
+            // click rescans.
+        } else if (g_discApply) {
             g_discApply = false;
             g_discPick = (n > 0) ? 0 : -1;
             if (g_discPick >= 0) applyDiscPick();
@@ -927,6 +996,22 @@ void coopPanelDrive(GameWorld* gw) {
     // must run without the panel); the panel below stays interactive-only.
     tickDiscovery();
     if (!(g_cfg.scenario.empty() && g_cfg.testSeconds == 0)) return;
+
+    // Menu-flow rehearsal (KENSHICOOP_UI_AUTO=host|join): press HOST GAME /
+    // JOIN GAME for us ~15 s after the first interactive tick. Synthetic mouse
+    // input never reaches Kenshi, so the automated flow test drives the SAME
+    // entry point the launcher buttons call. One-shot; interactive mode only
+    // (this sits below the harness gate).
+    if (!g_cfg.uiAuto.empty() && !g_uiAutoFired) {
+        static DWORD s_uiAutoFirst = 0;
+        if (s_uiAutoFirst == 0) s_uiAutoFirst = GetTickCount();
+        if (GetTickCount() - s_uiAutoFirst >= 15000) {
+            g_uiAutoFired = true;
+            coopLog(g_cfg.uiAuto == "host" ? "[coop-ui] UI_AUTO pressing HOST GAME"
+                                           : "[coop-ui] UI_AUTO pressing JOIN GAME");
+            coopUiMenuAction(g_cfg.uiAuto == "host");
+        }
+    }
     coop::engine::CoopPanelState ps;
     ps.selfSteamId  = (unsigned long long)coop::steamp2p::selfId();
     ps.peerSteamId  = g_cfg.steamPeer;
@@ -993,7 +1078,8 @@ void coopPanelDrive(GameWorld* gw) {
     // US) can fire coopUiConnect; the outbound invite/picker UI is gone.
     coop::steaminvite::tick();
 
-    coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect, &coopUiScan);
+    coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect, &coopUiScan,
+                                &coopUiMenuAction);
     coop::engine::coopOverlayTick(gw, detail.c_str(), ostate, g_net.isRunning());
 }
 

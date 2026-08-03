@@ -28,6 +28,10 @@ struct Config {
                                    // fires one scan on its own shortly after
                                    // startup and logs the results - lets the
                                    // loopback rig prove probe->reply end to end.
+    std::string   uiAuto;          // KENSHICOOP_UI_AUTO ("host"|"join", rehearsal
+                                   // only): auto-press the title-screen launcher
+                                   // button ~15 s in - the one-click flow test
+                                   // (synthetic clicks never reach Kenshi).
     std::string   save;            // KENSHICOOP_SAVE (auto-load; empty = manual)
     int           testSeconds;     // KENSHICOOP_TEST_SECONDS (0 = no self-exit)
     std::string   logPath;         // KENSHICOOP_LOG

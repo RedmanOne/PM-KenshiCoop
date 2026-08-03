@@ -74,17 +74,30 @@ Kenshi `mods` directory so you end up with
 `C:\Program Files (x86)\Steam\steamapps\common\Kenshi\mods\`). Then launch
 Kenshi and enable **KenshiCoop** in the Mods menu.
 
-### 2. Connect in-game (press F2)
+### 2a. The two-click way (recommended: Tailscale + the menu buttons)
+
+Put everyone in one [tailscale](https://tailscale.com) network once (free for
+3 users; it's LAN-grade UDP over the internet with no port forwarding). After
+that, a session is:
+
+- **Host:** launch Kenshi, click **HOST GAME** on the main menu, then load
+  your save (or start a new game). Done.
+- **Everyone else:** launch Kenshi, click **JOIN GAME**. Done. It finds the
+  host on your tailnet/LAN by itself, picks your squad slot by itself (second
+  clicker gets squad 2, third gets squad 3), connects, and streams the host's
+  world in. The status row on the launcher narrates the whole thing.
+
+No IDs, no addresses, no settings. If JOIN says "No hosts found", the host
+isn't ONLINE yet (or isn't on your tailnet/LAN) - click it again once they
+are. The buttons use the UDP transport; for Steam transport use the panel
+(below).
+
+### 2b. The full panel (press F2 - Steam transport / manual setup)
 
 The Co-op panel works at the **main menu** (before you load a game) as well as
-in-game, so the joining player doesn't need to load anything first. The main
-menu also shows a small **"KenshiCoop - play together"** window with native
-**HOST GAME** / **JOIN GAME** buttons: either one opens the co-op panel with
-the role pre-armed (JOIN on UDP transport also starts a host scan right away),
-and its status row mirrors the live session state, so you can watch a join
-stream the host's world without opening anything.
+in-game, so the joining player doesn't need to load anything first.
 
-1. Press **F2** to open the Co-op panel (or click HOST/JOIN GAME on the menu).
+1. Press **F2** to open the Co-op panel.
 2. **Swap Steam IDs.** Each player clicks **"Copy my Steam ID"** and sends it to
    the other (Steam chat, Discord, ...). When you receive your friend's ID, copy
    it, then click **"Paste friend's Steam ID"** - the panel shows the ID it
@@ -109,18 +122,16 @@ the host's address in `"ip"` / `"port"`. Then in the panel set **Transport: UDP*
 and go ONLINE. The `ip`/`port` are re-read whenever you go ONLINE, so no restart
 is needed after an edit.
 
-**Tailscale (recommended for friends over the internet on UDP):** put everyone
-in one [tailscale](https://tailscale.com) network and you get LAN-grade UDP
-between machines with **no port forwarding** (it's a flat WireGuard mesh).
-With **Role: JOIN** and **Transport: UDP**, click **"Scan for hosts
-(Tailscale / LAN)"** in the F2 panel: it probes every machine in your tailnet
-(plus the local network) and lists whoever is hosting - name, address, save,
-and player count. Click the button again to step through multiple found hosts;
-the picked one is what ONLINE connects to, no config editing or address typing
-needed. Scanning uses the `tailscale` CLI if installed; without it you can
-still join by pasting the host's `100.x.y.z` address into the config as above.
-The host answers scan probes only from private/tailnet addresses - it never
-advertises to the open internet.
+**Host browser in the panel:** with **Role: JOIN** and **Transport: UDP**, the
+**"Scan for hosts (Tailscale / LAN)"** button probes every machine in your
+tailnet (plus the local network) and lists whoever is hosting - name, address,
+save, player count. Click again to step through multiple found hosts; the
+picked one is what ONLINE connects to. (This is the same scan JOIN GAME runs -
+the panel version just lets you pick when several hosts are up.) Scanning uses
+the `tailscale` CLI if installed; without it you can still join by pasting the
+host's `100.x.y.z` address into the config as above. The host answers scan
+probes only from private/tailnet addresses - it never advertises to the open
+internet.
 
 ### Good to know
 

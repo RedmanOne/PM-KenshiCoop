@@ -65,8 +65,14 @@ typedef void (*CoopDisconnectFn)();
 // hosts; further presses step through the results (the plugin root cycles the
 // pick and re-arms the connect endpoint).
 typedef void (*CoopScanFn)();
+// Title-screen launcher buttons - the ONE-CLICK flow (host=true for HOST
+// GAME): the plugin root goes ONLINE as a UDP host, or scans + auto-picks a
+// host + auto-claims the next free squad slot + connects. No panel involved;
+// F2 stays the advanced path (Steam transport, manual slot, host cycling).
+typedef void (*CoopMenuActionFn)(bool host);
 void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
-                   CoopDisconnectFn onDisconnect, CoopScanFn onScan);
+                   CoopDisconnectFn onDisconnect, CoopScanFn onScan,
+                   CoopMenuActionFn onMenuAction);
 
 // Persistent co-op connection-status overlay: a single ScreenLabel tracked to the
 // local leader (the spike-47/48 screenshot-proven render path) whose caption shows

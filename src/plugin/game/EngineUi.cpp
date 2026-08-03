@@ -278,8 +278,8 @@ void onSlotBtn(DataPanelLine*) {
     b[sizeof(b) - 1] = '\0';
     coop::logLine(b);
 }
-// Title-screen launcher buttons: record the choice; the panel-open (which
-// needs live session state) happens in coopPanelTick where *st is available.
+// Title-screen launcher buttons: record the choice; the ONE-CLICK action is
+// dispatched in coopPanelTick (the plugin root owns the session wiring).
 void onMenuHostBtn(DataPanelLine*) {
     g_menuOpenReq = 1;
     coop::logLine("[coop-ui] menu: HOST GAME pressed");
@@ -463,7 +463,11 @@ void coopMenuLauncherTick(ForgottenGUI* g, const CoopPanelState* st) {
         }
         return;
     }
+    // Status priority: the world stream beats everything; a live session line
+    // beats the browser line; the browser line (scanning / found / none)
+    // narrates the one-click JOIN while still offline.
     std::string status = st->detail ? std::string(st->detail) : std::string();
+    if (!st->running && st->discDetail && st->discDetail[0]) status = st->discDetail;
     if (st->transferDetail) status = st->transferDetail; // join streaming the world
     if (!g_menuPanel) {
         std::string layer = "Info"; // the render-proven layer (spike 48)
@@ -488,13 +492,13 @@ void coopMenuLauncherTick(ForgottenGUI* g, const CoopPanelState* st) {
     if (!g_menuBuilt || status != g_menuLastStatus) {
         std::string title   = "KenshiCoop  -  play together";
         std::string hostKey = "mhost";
-        std::string hostCap = "HOST GAME    (co-op panel as host)";
+        std::string hostCap = "HOST GAME";
         std::string joinKey = "mjoin";
-        std::string joinCap = "JOIN GAME    (find + join a host)";
+        std::string joinCap = "JOIN GAME";
         std::string statKey = "Status";
         std::string statVal = status.empty() ? std::string("Offline") : status;
         std::string hintKey = "Hint";
-        std::string hintVal = "F2 opens/closes the full co-op panel";
+        std::string hintVal = "Host: click, then load your save. Join: just click.";
         std::string empty   = "";
         MenuStrings ms;
         ms.title = &title;
@@ -515,7 +519,8 @@ void coopMenuLauncherTick(ForgottenGUI* g, const CoopPanelState* st) {
 } // namespace
 
 void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
-                   CoopDisconnectFn onDisconnect, CoopScanFn onScan) {
+                   CoopDisconnectFn onDisconnect, CoopScanFn onScan,
+                   CoopMenuActionFn onMenuAction) {
     if (!st) return;
     ForgottenGUI* g = ::gui; // KenshiLib data export (spike 46)
     { static void* s_last = (void*)-1;
@@ -560,24 +565,14 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     g_panel.f2Down = f2;
 
     // Title-screen launcher: native HOST/JOIN buttons on the main menu. A
-    // press opens the full panel with the role pre-armed; JOIN on UDP also
-    // kicks the discovery scan so the browser row fills in by itself.
+    // press is the whole flow (one-click: no panel, no toggles) - the plugin
+    // root hosts, or scans + auto-picks + auto-slots + connects. The launcher
+    // status row narrates progress; F2 stays the advanced path.
     coopMenuLauncherTick(g, st);
     if (g_menuOpenReq != 0) {
         int req = g_menuOpenReq;
         g_menuOpenReq = 0;
-        if (!g_panel.open) {
-            g_panel.hostFlag      = (req > 0);
-            g_panel.steamFlag     = (st->transportSel == 0);
-            g_panel.connectedFlag = st->running;
-            g_panel.lastConnected = st->running;
-            g_panel.lastChkVal    = st->running;
-            g_panel.open = true;
-            g_panel.needsRebuild = true;
-            coop::logLine(req > 0 ? "[coop-ui] panel opened (menu: host)"
-                                  : "[coop-ui] panel opened (menu: join)");
-            if (req < 0 && st->transportSel != 0 && onScan) onScan();
-        }
+        if (onMenuAction) onMenuAction(req > 0);
     }
 
     if (!g_panel.open) return;

@@ -292,6 +292,7 @@ void loadConfig(Config& c) {
             envOr("KENSHICOOP_DISC_PORT", fileOr(f, "discPort", "27815").c_str()).c_str());
         c.discPort = (dp > 0 && dp < 65536) ? dp : 27815;
         c.discAutoScan = envOr("KENSHICOOP_DISC_AUTOSCAN", "0") != "0";
+        c.uiAuto = envOr("KENSHICOOP_UI_AUTO", "");
     }
 
     // In-game panel session control: opt-in legacy auto-start. Default OFF so a
