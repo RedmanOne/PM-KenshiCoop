@@ -92,6 +92,15 @@ isn't ONLINE yet (or isn't on your tailnet/LAN) - click it again once they
 are. The buttons use the UDP transport; for Steam transport use the panel
 (below).
 
+**Friends who are bad at computers:** make them a self-contained kit -
+`scripts\make_friend_kit.ps1 -AuthKey tskey-auth-...` packages the mod plus a
+double-click `SETUP.cmd` that installs everything AND joins them to your
+tailscale network with a pre-auth key (generate one at
+login.tailscale.com/admin/settings/keys - reusable, short expiry). They never
+make a Tailscale account or see a login: unzip, double-click, click Yes,
+launch Kenshi, JOIN GAME. Treat the zip like a password and revoke the key
+once they're in (their machines stay joined).
+
 ### 2b. The full panel (press F2 - Steam transport / manual setup)
 
 The Co-op panel works at the **main menu** (before you load a game) as well as
