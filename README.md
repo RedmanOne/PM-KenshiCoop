@@ -142,6 +142,13 @@ advertises to the open internet.
   To resume next time, the host loads that save and goes online, and the join
   can reconnect straight from the main menu again.
 
+### Good to know (cosmetics)
+
+- **RE_Kenshi's settings window opens on every launch** by default. Untick
+  *"Open RE_Kenshi settings on startup"* in that window (or set
+  `"OpenSettingOnStart": false` in `<Kenshi>\RE_Kenshi.ini`) and the title
+  screen stays clean - just the game menu and the co-op launcher.
+
 ### If something goes wrong
 
 - **"The co-op plugin has not started"** - RE_Kenshi didn't load it. Check
