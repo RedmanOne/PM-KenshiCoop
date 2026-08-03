@@ -332,8 +332,11 @@ bool NetLink::acceptEpoch(u32 ownerId, u32 epoch) {
 // host re-sends to the OTHER joins. Everything here already carries the
 // sender's ownerId and is deduped/gated per owner on the receiver, so a
 // relayed copy is indistinguishable from a direct one. Host-directed intents
-// (speed/save/load/spawn requests, cam hints, time probes) and the handshake
-// never relay; the host-authoritative channels (census/prod/research/time/
+// (speed/save/load/spawn requests and time probes) and the handshake never
+// relay. Camera hints are the exception: attention-gated reconciliation needs
+// every client to evaluate the same camera-anchor set, so the host forwards a
+// join's hint to the other join. The host-authoritative channels
+// (census/prod/research/time/
 // stealth/spawn-info) are only ever host-authored so they never arrive at the
 // host to begin with. PKT_ENTITY_BATCH relays too, but inside its epoch-
 // accepted branch in the receive ladder, not through this list. The symmetric
@@ -355,6 +358,7 @@ bool NetLink::isRelayedType(u8 type) {
         case PKT_COMBAT_HIT:
         case PKT_STATS:
         case PKT_MONEY:
+        case PKT_CAM_HINT:
             return true;
         default:
             return false;
@@ -1122,10 +1126,12 @@ void NetLink::threadLoop() {
                             inbound_->pushLoadNack(ln.ownerId, ln);
                         }
                     } else if (type == PKT_CAM_HINT) {
-                        // Camera hint (protocol 43, join -> host): latest-wins
-                        // interest anchor. Only meaningful on the host.
+                        // Camera hint (protocol 43): latest-wins interest
+                        // anchor. Accepted in BOTH directions - the attention
+                        // gate needs each side to know where the peer is
+                        // looking, not just the host.
                         CamHintPacket chp;
-                        if (isHost_ && readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &chp)
+                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &chp)
                             && inbound_) {
                             inbound_->pushCamHint(chp.ownerId, chp);
                         }
@@ -1161,8 +1167,10 @@ void NetLink::threadLoop() {
                             }
                         }
                     }
-                    // Host relay (protocol 49): forward join-authored reliable
-                    // state to the other joins - the star's third edge. Runs
+                    // Host relay (protocol 49): forward join-authored,
+                    // owner-tagged state to the other joins - the star's third
+                    // edge. Most rows are reliable; camera hints intentionally
+                    // retain their unreliable/latest-wins delivery. Runs
                     // after local delivery so the relayed copy and our own
                     // apply see the same order. (Entity batches relay in their
                     // epoch-gated branch above, not here.)
@@ -1749,8 +1757,8 @@ void NetLink::threadLoop() {
         }
 
         // Drain + send any queued camera hints on CH_UNRELIABLE (protocol
-        // 43, join -> host, ~1 Hz). Latest wins; a lost hint is replaced by
-        // the next one a second later.
+        // 43, both directions, ~1 Hz). Latest wins; a lost hint is replaced
+        // by the next one a second later.
         std::vector<CamHintPacket> camHints;
         EnterCriticalSection(&outCs_);
         camHints.swap(outCamHint_);

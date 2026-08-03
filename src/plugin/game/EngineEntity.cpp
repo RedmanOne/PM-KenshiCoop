@@ -670,6 +670,21 @@ bool cameraCenter(GameWorld* gw, float out[3]) {
     return true;
 }
 
+bool cameraFocusOn(GameWorld* gw, Character* c) {
+    if (!gw || !c || !g_camFocusFn || !g_camIsInitFn) return false;
+    __try {
+        PlayerInterface* pl = gw->player;
+        if (!pl) return false;
+        CameraClass* cam = pl->camera;
+        if (!cam || !g_camIsInitFn(cam)) return false;
+        Ogre::Vector3 offset(0.0f, 0.0f, 0.0f);
+        g_camFocusFn(cam, static_cast<RootObject*>(c), &offset, false);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
 // Camera anchor stores (protocol 43, camera-anchored interest). Main-thread
 // only: the sync layer publishes these each tick (syncCamHint), and
 // interestCenters reads them in the same tick. One peer slot per possible
@@ -706,7 +721,7 @@ void setPeerCamHint(unsigned int slot, bool valid, float x, float y, float z) {
 // EACH player stay streamed (spike 19's validated design).
 //
 // Protocol 43 grows the set with camera anchors: the LOCAL camera center and
-// each join's fresh CAMERA HINT - so NPCs where a player is LOOKING (but no
+// each peer's fresh CAMERA HINT - so NPCs where a player is LOOKING (but no
 // PC is standing) stay streamed/listed. Camera anchors within ~100u of an
 // existing anchor are dropped (the common camera-follows-leader case adds no
 // reach, only query cost). Writes up to INTEREST_MAX centers; returns the
@@ -911,7 +926,8 @@ bool captureNpcByHand(GameWorld* gw, unsigned int hIndex, unsigned int hSerial,
 // can decide which are NOT in the host's streamed set and suppress them. Mirrors
 // captureNpcs' interest query so the join's local set matches the host's.
 unsigned int listNpcs(GameWorld* gw, Character** outChars, EntityState* outStates,
-                      unsigned int maxOut) {
+                      unsigned int maxOut, bool* outTruncated) {
+    if (outTruncated) *outTruncated = false;
     if (!g_getCharsFn || !gw || !outChars || !outStates || maxOut == 0) return 0;
     unsigned int n = 0;
     __try {
@@ -921,10 +937,15 @@ unsigned int listNpcs(GameWorld* gw, Character** outChars, EntityState* outState
         unsigned int nc = interestCenters(gw, centers);
         if (nc == 0) return 0;
         for (unsigned int ci = 0; ci < nc; ++ci) {
+            // Out of room with whole anchors still unvisited: conservatively a
+            // truncation (we cannot know what those spheres held without room
+            // to accept it).
+            if (n >= maxOut) { if (outTruncated) *outTruncated = true; break; }
             g_npcQuery.clear();
             g_getCharsFn(gw, &g_npcQuery, &centers[ci], 200.0f, 120.0f, 30.0f, 96, 96, 0);
             unsigned int total = g_npcQuery.size();
-            for (unsigned int i = 0; i < total && n < maxOut; ++i) {
+            unsigned int i = 0;
+            for (; i < total && n < maxOut; ++i) {
                 RootObject* obj = g_npcQuery[i];
                 if (!obj) continue;
                 if (isPlayerSquad(gw, obj)) continue; // never suppress our own squad
@@ -935,6 +956,9 @@ unsigned int listNpcs(GameWorld* gw, Character** outChars, EntityState* outState
                 if (dup) continue;
                 if (captureOne(ch, &outStates[n])) { outChars[n] = ch; ++n; }
             }
+            // Left this sphere's list unfinished: the only non-exhaustion exit
+            // from the loop above is the maxOut cap.
+            if (i < total && outTruncated) *outTruncated = true;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return n;
@@ -943,7 +967,9 @@ unsigned int listNpcs(GameWorld* gw, Character** outChars, EntityState* outState
 }
 
 unsigned int listNpcsWide(GameWorld* gw, float radius, Character** outChars,
-                          EntityState* outStates, unsigned int maxOut) {
+                          EntityState* outStates, unsigned int maxOut,
+                          bool* outTruncated) {
+    if (outTruncated) *outTruncated = false;
     if (!g_getCharsFn || !gw || !outChars || !outStates || maxOut == 0) return 0;
     if (radius <= 0.0f) return 0;
     unsigned int n = 0;
@@ -955,11 +981,13 @@ unsigned int listNpcsWide(GameWorld* gw, float radius, Character** outChars,
         unsigned int nc = interestCenters(gw, centers);
         if (nc == 0) return 0;
         for (unsigned int ci = 0; ci < nc; ++ci) {
+            if (n >= maxOut) { if (outTruncated) *outTruncated = true; break; }
             g_npcQuery.clear();
             g_getCharsFn(gw, &g_npcQuery, &centers[ci], radius, radius, radius,
                          512, 512, 0);
             unsigned int total = g_npcQuery.size();
-            for (unsigned int i = 0; i < total && n < maxOut; ++i) {
+            unsigned int i = 0;
+            for (; i < total && n < maxOut; ++i) {
                 RootObject* obj = g_npcQuery[i];
                 if (!obj) continue;
                 if (isPlayerSquad(gw, obj)) continue; // never census our own squad
@@ -970,6 +998,28 @@ unsigned int listNpcsWide(GameWorld* gw, float radius, Character** outChars,
                 if (dup) continue;
                 if (captureOne(ch, &outStates[n])) { outChars[n] = ch; ++n; }
             }
+            if (i < total && outTruncated) *outTruncated = true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return n;
+    }
+    return n;
+}
+
+unsigned int countNpcsNear(GameWorld* gw, float x, float y, float z,
+                           float radius) {
+    if (!g_getCharsFn || !gw || radius <= 0.0f) return 0;
+    unsigned int n = 0;
+    __try {
+        Ogre::Vector3 c(x, y, z);
+        g_npcQuery.clear();
+        g_getCharsFn(gw, &g_npcQuery, &c, radius, radius, radius, 512, 512, 0);
+        unsigned int total = g_npcQuery.size();
+        for (unsigned int i = 0; i < total; ++i) {
+            RootObject* obj = g_npcQuery[i];
+            if (!obj) continue;
+            if (isPlayerSquad(gw, obj)) continue;
+            ++n;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return n;

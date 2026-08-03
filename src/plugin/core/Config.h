@@ -113,6 +113,20 @@ struct Config {
     // culling is untouched. 0 disables parking.
     float        censusParkDist;    // KENSHICOOP_CENSUS_PARK          (120 u)
 
+    // Attention gate (attention-gated reconciliation): how close an interest
+    // anchor - any participant's tab leaders or camera - must be to a body
+    // before the replicated worlds are reconciled there. A body no anchor
+    // is within this radius of is DORMANT: the host leaves it out of the
+    // census, and the join never suppresses it for being census-absent. That
+    // makes "the join sees an NPC the host doesn't" the intended outcome in a
+    // region nobody is watching, instead of a ghost to be hidden.
+    // Default 1000 u: above spawnMintRadius, so anything the join may proxy-
+    // mint is observed by construction, and well below censusRadius, so the
+    // gate actually bites on the outer census band. 0 disables the gate -
+    // every body is treated as observed, i.e. exactly the pre-gate behaviour
+    // (fail-open A/B hatch).
+    float        attentionRadius;   // KENSHICOOP_ATTENTION_RADIUS     (1000 u)
+
     // Census-band AI freeze (KENSHICOOP_CENSUS_FREEZE_AI, DEFAULT ON): the join
     // suspends the local AI of a census-band body (census-present, unstreamed)
     // that diverges past censusParkDist_, so a captive/working slave can't flee
@@ -121,9 +135,9 @@ struct Config {
     bool         censusFreezeAi;     // KENSHICOOP_CENSUS_FREEZE_AI     (on)
 
     // Camera-anchored interest (KENSHICOOP_CAM_INTEREST, DEFAULT ON,
-    // protocol 43): interestCenters grows from the two squad-tab-leader
-    // spheres to up to FOUR anchors - + the local camera center + the peer's
-    // ~1 Hz camera hint (PKT_CAM_HINT), deduped within ~100 u. NPCs where a
+    // protocol 43): interestCenters grows from up to three squad-tab-leader
+    // spheres to up to SIX anchors - + the local camera center + two peers'
+    // ~1 Hz camera hints (PKT_CAM_HINT), deduped within ~100 u. NPCs where a
     // player is LOOKING (but no PC stands) stay streamed/listed. A/B hatch.
     bool         camInterest;        // KENSHICOOP_CAM_INTEREST         (on)
 
