@@ -985,6 +985,10 @@ void coopPanelDrive(GameWorld* gw) {
     // Tailnet/LAN browser line (join+UDP): scan progress / the picked host.
     ps.discDetail = g_discDetail.empty() ? (const char*)0 : g_discDetail.c_str();
 
+    // Title screen == no world (the title hook drives this with gw=0; the
+    // in-game mainLoop hook always has a world). Shows the menu launcher.
+    ps.atTitle = (gw == 0);
+
     // Still pump Steam callbacks so an inbound "Join Game" (a friend inviting
     // US) can fire coopUiConnect; the outbound invite/picker UI is gone.
     coop::steaminvite::tick();

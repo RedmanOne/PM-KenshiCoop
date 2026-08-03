@@ -43,6 +43,13 @@ struct CoopPanelState {
     // currently picked host, or "no hosts found". Rendered as its own white
     // row above the Scan button; the plugin root owns the scan/pick state.
     const char*        discDetail;
+    // True when this tick came from the TITLE SCREEN (no world). Shows the
+    // co-op launcher window - native HOST GAME / JOIN GAME buttons on the
+    // main menu that open the panel with the role pre-armed (JOIN on UDP
+    // also kicks a discovery scan), so multiplayer is discoverable without
+    // knowing the F2 shortcut. The launcher hides while the panel is open
+    // and never exists in-game.
+    bool               atTitle;
 };
 // The panel's role/transport selections at the moment Connect is hit.
 // peerIds/peerCount are the Steam IDs pasted in-panel this session (protocol

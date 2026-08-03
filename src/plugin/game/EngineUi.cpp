@@ -217,6 +217,19 @@ DataPanelLine*          g_discLine     = 0; // white "Found hosts" browser row
 DataPanelLine*          g_peerLine     = 0; // white "Friend's Steam ID" row
 DataPanelLine*          g_selfLine     = 0; // white "Your Steam ID" row
 bool                    g_scanClicked  = false; // Scan pressed; dispatched in tick
+
+// Title-screen co-op launcher: a small always-visible window on the MAIN MENU
+// with native HOST GAME / JOIN GAME buttons (the same proven DatapanelGUI
+// stack as the F2 panel - it renders at the title screen, spike 50). Clicking
+// arms the role and opens the full panel; the launcher hides while the panel
+// is open and is destroyed the moment a world exists.
+DatapanelGUI*           g_menuPanel    = 0;
+DataPanelLine_Button*   g_menuHostBtn  = 0;
+DataPanelLine_Button*   g_menuJoinBtn  = 0;
+DataPanelLine*          g_menuStatLine = 0;
+bool                    g_menuBuilt    = false;
+int                     g_menuOpenReq  = 0; // +1 HOST pressed, -1 JOIN pressed
+std::string             g_menuLastStatus;   // rebuild gate for the status row
 std::string             g_selfIdStr;   // self SteamID as digits (set each tick; "" = none)
 
 // Friend SteamIDs pasted in-panel this session (protocol 49: a HOST may hold
@@ -264,6 +277,16 @@ void onSlotBtn(DataPanelLine*) {
     _snprintf(b, sizeof(b) - 1, "[coop-ui] squad slot -> %u", g_slotChoice);
     b[sizeof(b) - 1] = '\0';
     coop::logLine(b);
+}
+// Title-screen launcher buttons: record the choice; the panel-open (which
+// needs live session state) happens in coopPanelTick where *st is available.
+void onMenuHostBtn(DataPanelLine*) {
+    g_menuOpenReq = 1;
+    coop::logLine("[coop-ui] menu: HOST GAME pressed");
+}
+void onMenuJoinBtn(DataPanelLine*) {
+    g_menuOpenReq = -1;
+    coop::logLine("[coop-ui] menu: JOIN GAME pressed");
 }
 // Scan for hosts (JOIN + UDP): the actual scan/cycle logic lives in the plugin
 // root (it owns the discovery module + config); the GUI only reports the press.
@@ -403,6 +426,86 @@ void panelDestroySeh(ForgottenGUI* g, DatapanelGUI* p) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// POD-only string bundle for the launcher rows (same C2712 discipline as
+// PanelStrings: the SEH build frame constructs no std::string).
+struct MenuStrings {
+    const std::string *title;
+    const std::string *hostKey, *hostCap, *joinKey, *joinCap;
+    const std::string *statKey, *statVal;
+    const std::string *hintKey, *hintVal;
+    const std::string *empty;
+};
+
+void menuBuildSeh(DatapanelGUI* p, const MenuStrings* s) {
+    __try {
+        p->_NV_clear();
+        p->setCaption(*s->title);
+        g_menuHostBtn = p->setLineButton(*s->hostKey, *s->hostCap, 0);
+        g_menuJoinBtn = p->setLineButton(*s->joinKey, *s->joinCap, 0);
+        p->addSpace(0, 0.30f);
+        g_menuStatLine = p->setLine(*s->statKey, *s->statVal, *s->empty, 0, false, true);
+        p->setLine(*s->hintKey, *s->hintVal, *s->empty, 0, false, true);
+        p->_NV_update();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Create/refresh/destroy the title-screen launcher. Exists exactly when the
+// tick is at the TITLE and the full panel is closed; the status row mirrors
+// the live session line so "Hosting - waiting for peer..." is visible without
+// opening the panel (a join going ONLINE from the menu is the normal flow).
+void coopMenuLauncherTick(ForgottenGUI* g, const CoopPanelState* st) {
+    bool want = st->atTitle && !g_panel.open;
+    if (!want) {
+        if (g_menuPanel) {
+            panelDestroySeh(g, g_menuPanel);
+            g_menuPanel = 0; g_menuHostBtn = 0; g_menuJoinBtn = 0;
+            g_menuStatLine = 0; g_menuBuilt = false;
+        }
+        return;
+    }
+    std::string status = st->detail ? std::string(st->detail) : std::string();
+    if (st->transferDetail) status = st->transferDetail; // join streaming the world
+    if (!g_menuPanel) {
+        std::string layer = "Info"; // the render-proven layer (spike 48)
+        g_menuPanel = g->createDatapanel(0.70f, 0.06f, 0.28f, 0.20f, false, layer, true);
+        g_menuBuilt = false;
+        if (!g_menuPanel) {
+            static bool s_warned = false;
+            if (!s_warned) { s_warned = true;
+                coop::logErrLine("[coop-ui] menu launcher createDatapanel FAILED"); }
+            return;
+        }
+        if (!uiPanelArmSeh(g, g_menuPanel))
+            coop::logErrLine("[coop-ui] menu launcher arm FAILED");
+        coop::logLine("[coop-ui] menu launcher shown");
+    }
+    if (!g_menuBuilt || status != g_menuLastStatus) {
+        std::string title   = "KenshiCoop  -  play together";
+        std::string hostKey = "mhost";
+        std::string hostCap = "HOST GAME    (co-op panel as host)";
+        std::string joinKey = "mjoin";
+        std::string joinCap = "JOIN GAME    (find + join a host)";
+        std::string statKey = "Status";
+        std::string statVal = status.empty() ? std::string("Offline") : status;
+        std::string hintKey = "Hint";
+        std::string hintVal = "F2 opens/closes the full co-op panel";
+        std::string empty   = "";
+        MenuStrings ms;
+        ms.title = &title;
+        ms.hostKey = &hostKey; ms.hostCap = &hostCap;
+        ms.joinKey = &joinKey; ms.joinCap = &joinCap;
+        ms.statKey = &statKey; ms.statVal = &statVal;
+        ms.hintKey = &hintKey; ms.hintVal = &hintVal;
+        ms.empty = &empty;
+        menuBuildSeh(g_menuPanel, &ms);
+        if (g_menuHostBtn) g_menuHostBtn->callback = MyGUI::newDelegate(&onMenuHostBtn);
+        if (g_menuJoinBtn) g_menuJoinBtn->callback = MyGUI::newDelegate(&onMenuJoinBtn);
+        dbgColourSeh(g_menuStatLine, st->transferDetail != 0); // amber while streaming
+        g_menuBuilt = true;
+        g_menuLastStatus = status;
+    }
+}
+
 } // namespace
 
 void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
@@ -449,6 +552,27 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         }
     }
     g_panel.f2Down = f2;
+
+    // Title-screen launcher: native HOST/JOIN buttons on the main menu. A
+    // press opens the full panel with the role pre-armed; JOIN on UDP also
+    // kicks the discovery scan so the browser row fills in by itself.
+    coopMenuLauncherTick(g, st);
+    if (g_menuOpenReq != 0) {
+        int req = g_menuOpenReq;
+        g_menuOpenReq = 0;
+        if (!g_panel.open) {
+            g_panel.hostFlag      = (req > 0);
+            g_panel.steamFlag     = (st->transportSel == 0);
+            g_panel.connectedFlag = st->running;
+            g_panel.lastConnected = st->running;
+            g_panel.lastChkVal    = st->running;
+            g_panel.open = true;
+            g_panel.needsRebuild = true;
+            coop::logLine(req > 0 ? "[coop-ui] panel opened (menu: host)"
+                                  : "[coop-ui] panel opened (menu: join)");
+            if (req < 0 && st->transportSel != 0 && onScan) onScan();
+        }
+    }
 
     if (!g_panel.open) return;
 

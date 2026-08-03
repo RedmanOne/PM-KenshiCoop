@@ -77,9 +77,14 @@ Kenshi and enable **KenshiCoop** in the Mods menu.
 ### 2. Connect in-game (press F2)
 
 The Co-op panel works at the **main menu** (before you load a game) as well as
-in-game, so the joining player doesn't need to load anything first.
+in-game, so the joining player doesn't need to load anything first. The main
+menu also shows a small **"KenshiCoop - play together"** window with native
+**HOST GAME** / **JOIN GAME** buttons: either one opens the co-op panel with
+the role pre-armed (JOIN on UDP transport also starts a host scan right away),
+and its status row mirrors the live session state, so you can watch a join
+stream the host's world without opening anything.
 
-1. Press **F2** to open the Co-op panel.
+1. Press **F2** to open the Co-op panel (or click HOST/JOIN GAME on the menu).
 2. **Swap Steam IDs.** Each player clicks **"Copy my Steam ID"** and sends it to
    the other (Steam chat, Discord, ...). When you receive your friend's ID, copy
    it, then click **"Paste friend's Steam ID"** - the panel shows the ID it
