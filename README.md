@@ -34,7 +34,6 @@ makes becomes one shared save, streamed to both machines automatically.
 ```
 src/plugin/       The KenshiCoop plugin (net, sync/replication, engine facade, scenarios)
 src/netproto/     Shared wire-protocol headers (plain C++03, compiled by everything)
-src/nettest/      Standalone ENet console app (transport de-risking)
 src/netsim/       Protocol simulator
 src/prototest/    Wire-protocol unit tests
 src/tunneltest/   Steam-tunnel socket-hook tests
