@@ -65,10 +65,13 @@ helper, which feeds MSBuild a complete `PATH`/`INCLUDE`/`LIB` and uses
 `UseEnv=true` (so it does not depend on VS2010 registry auto-detection):
 
 ```bash
-cmd //c scripts/build_plugin.cmd
+cmd //c scripts/build_plugin.cmd Release
 ```
 
 Output: `src/plugin/x64/Release/KenshiCoop.dll` (x64 DLL exporting `startPlugin`).
+With no argument the script builds the `Harness` configuration (the
+instrumented build the test pipeline uses) to `x64/Harness/` instead; pass
+`Release` for the DLL you actually play on.
 
 You can also open `KenshiCoop.sln` in the VS2022 IDE and build **Release | x64**,
 but the IDE relies on the registry fix below.
