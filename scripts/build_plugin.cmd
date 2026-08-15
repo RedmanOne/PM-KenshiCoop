@@ -44,6 +44,23 @@ if not exist "%SDK%\Include\Windows.h" (
 set "KL=%REPO%\third_party\KenshiLib_deps"
 set "ENET=%REPO%\third_party\enet\enet\include"
 
+REM Fail fast with a clear message instead of a wall of buried C1083 errors:
+REM these two dirs are git-ignored, so a fresh clone or a wiped third_party
+REM (the folders can go empty while stale user-scope env vars from a PRIOR
+REM setup still point at them, since env vars persist but untracked files
+REM don't) leaves cl.exe unable to find enet.h / GameWorld.h deep into the
+REM build. Check the two telltale headers up front.
+if not exist "%ENET%\enet\enet.h" (
+    echo ERROR: ENet source missing at %ENET%
+    echo   Run: powershell -ExecutionPolicy Bypass -File scripts\setup_toolchain.ps1
+    exit /b 1
+)
+if not exist "%KL%\KenshiLib\Include\kenshi\GameWorld.h" (
+    echo ERROR: KenshiLib_deps missing at %KL%
+    echo   Run: powershell -ExecutionPolicy Bypass -File scripts\setup_toolchain.ps1
+    exit /b 1
+)
+
 REM Locate MSBuild via vswhere, falling back to scanning known install roots.
 REM vswhere -latest can come back empty even with a complete, registered
 REM instance (seen when Build Tools was installed to a non-default drive

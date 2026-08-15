@@ -12,7 +12,19 @@ popd >nul
 
 set "VS10=C:\Program Files (x86)\Microsoft Visual Studio 10.0"
 set "VC=%VS10%\VC"
+
+REM Windows SDK 7.1's installer lets the user pick any drive; the official
+REM default is "C:\Program Files\Microsoft SDKs\Windows\v7.1" but it's also
+REM commonly found directly off another drive's root (e.g. "D:\Microsoft
+REM SDKs\Windows\v7.1") when that drive was chosen at install time. Try the
+REM default first, then fall back to scanning other drive roots (matches
+REM build_plugin.cmd's SDK detection).
 set "SDK=C:\Program Files\Microsoft SDKs\Windows\v7.1"
+if not exist "%SDK%\Include\Windows.h" (
+  for %%D in (C D E F) do (
+    if exist "%%D:\Microsoft SDKs\Windows\v7.1\Include\Windows.h" set "SDK=%%D:\Microsoft SDKs\Windows\v7.1"
+  )
+)
 
 set "PATH=%VC%\bin\amd64;%VC%\bin;%VS10%\Common7\IDE;%SDK%\Bin\x64;%SDK%\Bin;%PATH%"
 set "INCLUDE=%VC%\include;%SDK%\Include;%REPO%\third_party\vc10_compat"
