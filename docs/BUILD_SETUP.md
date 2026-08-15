@@ -1,4 +1,4 @@
-# Build Setup
+# Build setup
 
 This document describes how to build the two artifacts in this repo:
 
@@ -426,4 +426,3 @@ SCENARIO RESULT <PASS|FAIL>
    main thread.
 4. Emit `CHECK` / `SCENARIO MEMBER` lines so the runner can assert. Rebuild with
    `dev_cycle.ps1` (it rebuilds automatically) and run with `-Scenario my_scenario`.
-
