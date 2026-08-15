@@ -123,6 +123,7 @@
     <ClCompile Include="core\Config.cpp" />
     <ClCompile Include="core\CrashDump.cpp" />
     <ClCompile Include="net\NetLink.cpp" />
+    <ClCompile Include="net\Discovery.cpp" />
     <ClCompile Include="net\SteamP2P.cpp" />
     <ClCompile Include="net\SteamInvite.cpp" />
     <ClCompile Include="game\EngineInternal.cpp" />
