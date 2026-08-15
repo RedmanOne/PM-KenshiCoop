@@ -195,8 +195,15 @@ The kit's `README.txt` has the full setup + troubleshooting list.
 
 The plugin must be compiled with the **Visual C++ 2010 (v100) x64 toolset** (a
 KenshiLib requirement). Full toolchain setup, gotchas, and install steps are in
-[docs/BUILD_SETUP.md](docs/BUILD_SETUP.md). Short version, once prerequisites
-are in place:
+[docs/BUILD_SETUP.md](docs/BUILD_SETUP.md). Short version:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_toolchain.ps1
+```
+
+fetches and configures everything except the v100 compiler itself and
+RE_Kenshi (both need an interactive Microsoft/Nexus installer - see
+`docs/BUILD_SETUP.md` Part A). Once it reports everything ready:
 
 ```bash
 cmd //c scripts/build_plugin.cmd
@@ -206,7 +213,8 @@ Dependencies are fetched, not committed:
 
 - KenshiLib + precompiled libs: clone
   [KenshiLib_Examples_deps](https://github.com/BFrizzleFoShizzle/KenshiLib_Examples_deps)
-  into `third_party/KenshiLib_deps/`
+  into `third_party/KenshiLib_deps/`, pinned to a specific commit and patched
+  for two vendor header bugs (see `third_party/KenshiLib_patches/README.md`)
 - ENet: clone [lsalzman/enet](https://github.com/lsalzman/enet) into
   `third_party/enet/enet/` and apply the patches in `third_party/enet/patches/`
   (see `third_party/enet/README.md`)

@@ -1,0 +1,52 @@
+KenshiLib_Examples_deps commit e75769b (pinned - see
+third_party/KenshiLib_patches/README.md) defines `enum BuildingDesignation`
+in BOTH kenshi/Building/Building.h and kenshi/Platoon.h (identical bodies -
+a vendor copy-paste bug; Platoon.h even has a "// TODO move?" comment above
+it). Any translation unit that includes both headers hits MSVC error C2011
+'BuildingDesignation': 'enum' type redefinition. KenshiCoop's plugin does,
+via EngineWorld.cpp and friends.
+
+Fix: drop the duplicate from Platoon.h and #include Building.h there instead
+(Building.h does not include Platoon.h, so no cycle).
+
+Apply from the KenshiCoop repo root after fetching+pinning KenshiLib_deps
+(see README.md in this folder for the fetch/checkout steps):
+
+    git apply third_party/KenshiLib_patches/0001-fix-duplicate-buildingdesignation-enum.patch
+
+--- a/third_party/KenshiLib_deps/KenshiLib/Include/kenshi/Platoon.h
++++ b/third_party/KenshiLib_deps/KenshiLib/Include/kenshi/Platoon.h
+@@ -8,6 +8,7 @@
+ #include <ogre/OgreMemoryAllocatorConfig.h>
+ #include <ogre/OgreVector3.h>
+ #include "Enums.h"
++#include "Building/Building.h"
+
+ enum PlatoonCreationMessage
+ {
+@@ -27,22 +28,9 @@ class PatrolInfo;
+ class AreaBiomeGroup;
+ class AreaSector;
+
+-// TODO move?
+-enum BuildingDesignation
+-{
+-    BD_NONE,
+-    BD_SHOP,
+-    BD_BARRACKS,
+-    BD_BAR,
+-    BD_HOSPITAL,
+-    BD_ARMOURY,
+-    BD_TREASURE,
+-    BD_PRISON,
+-    BD_HQ,
+-    BD_RESIDENTIAL,
+-    BD_SLAVE_STORAGE,
+-    BD_RESIDENTIAL_SMALL
+-};
++// BuildingDesignation now comes from Building/Building.h (see #include above) -
++// this file used to redefine it here too, which is a C2011 duplicate-enum
++// error under a single-translation-unit build that includes both headers.
+
+ enum BuildingFunction;
+

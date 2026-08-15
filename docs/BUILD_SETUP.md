@@ -22,28 +22,66 @@ This mirrors the requirements of `BFrizzleFoShizzle/KenshiLib_Examples`, whose
 Windows 10 SDK (`WindowsTargetPlatformVersion=10.0`).
 
 ### Prerequisites
-Status legend: [DONE] = fetched/configured in this repo automatically; [MANUAL] =
-you must install it (interactive Microsoft installer or authenticated download).
+Status legend: [SCRIPT] = handled by `scripts\setup_toolchain.ps1` (see below);
+[MANUAL] = you must install it (interactive Microsoft installer or authenticated
+download) - the script will tell you if these are still missing.
 
-- [DONE] KenshiLib + precompiled deps. Cloned (git-LFS) from
+Run this first, from a fresh `bash`/`cmd`/`powershell` at the repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_toolchain.ps1
+```
+
+It fetches and configures everything below marked [SCRIPT] - safe to re-run any
+time, it only does work that's actually missing - and prints a checklist of
+what (if anything) still needs the [MANUAL] steps. Pass `-Yes` to skip its
+confirmation prompt before installing VS2022 Build Tools.
+
+- [SCRIPT] ENet, cloned from `https://github.com/lsalzman/enet` into
+  `third_party/enet/enet/` (git-ignored) with the C89 and socket-hook patches
+  from `third_party/enet/patches/` applied.
+- [SCRIPT] KenshiLib + precompiled deps. Cloned (git-LFS) from
   `https://github.com/BFrizzleFoShizzle/KenshiLib_Examples_deps` into
-  `third_party/KenshiLib_deps/` (git-ignored). Provides KenshiLib `Include/`,
+  `third_party/KenshiLib_deps/` (git-ignored), **pinned to commit `e75769b`**
+  (newer commits reorganize headers in a way that breaks this project's
+  `#include` paths; see `third_party/KenshiLib_patches/README.md` for why),
+  with two vendor-bug patches from `third_party/KenshiLib_patches/` applied
+  (a duplicate `enum BuildingDesignation` definition, and a `CraftingItem`
+  type that's only ever forward-declared). Provides KenshiLib `Include/`,
   `Libraries/KenshiLib.lib`, `OgreMain_x64.lib`, `MyGUIEngine_x64.lib`.
-- [DONE] Boost 1.60.0. Bundled inside the deps repo and extracted to
+- [SCRIPT] Boost 1.60.0. Bundled inside the deps repo and extracted to
   `third_party/KenshiLib_deps/boost_1_60_0/` (contains the `boost/` headers).
-- [DONE] Environment variables (`KENSHILIB_DIR`, `BOOST_INCLUDE_PATH`,
+- [SCRIPT] Environment variables (`KENSHILIB_DIR`, `BOOST_INCLUDE_PATH`,
   `BOOST_ROOT`, `KENSHILIB_DEPS_DIR`) set at user scope pointing at the above.
-  These apply to newly launched shells/IDE sessions.
-- [MANUAL] The Visual C++ 2010 (v100) x64 toolset. Not available via winget
-  (only the 2010 *runtime* redistributables are). Install Visual Studio 2010
-  (any edition; Express was free), OR the Windows SDK 7.1 + "VC++ 2010 SP1
-  Compiler Update for the Windows SDK 7.1" which ships the v100 x64 compiler.
-  Modern MSBuild / VS2019+ can then drive the v100 toolset.
-- [MANUAL] Visual Studio 2019 or newer (or VS2022 Build Tools) for MSBuild. The
-  v100 toolset above is invoked through it.
-- [MANUAL] A separate Windows 7.1 SDK is NOT required - the example projects
-  target the Windows 10 SDK. You only need the Win7.1 SDK if you take the
-  "SDK 7.1 + compiler update" route above to obtain the v100 compiler itself.
+  These apply to newly launched shells/IDE sessions - restart your terminal
+  after running the script, before building.
+- [SCRIPT, with a manual confirmation prompt] MSBuild + the C++ build
+  scaffold (`$(VCTargetsPath)`), via VS2022 Build Tools' "Desktop development
+  with C++" workload. The bare MSBuild engine alone isn't enough - the v100
+  toolset definitions are provided by the SDK 7.1 route below, but MSBuild
+  still needs a C++ workload installed (any modern one) to have somewhere to
+  hang `$(VCTargetsPath)` off of before it gets to the v100 override.
+- [MANUAL] The Visual C++ 2010 (v100) x64 toolset itself. Not available via
+  winget (only the 2010 *runtime* redistributables are) and not something
+  `setup_toolchain.ps1` can drive - it's an interactive GUI installer. Install
+  Visual Studio 2010 (any edition; Express was free), OR the Windows SDK 7.1 +
+  "VC++ 2010 SP1 Compiler Update for the Windows SDK 7.1" (KB2519277) which
+  ships the v100 x64 compiler. Modern MSBuild (installed above) then drives
+  the v100 toolset.
+  - The SDK 7.1 **Headers and Libraries** component (not just the compiler)
+    IS required here, despite `WindowsTargetPlatformVersion` in the vcxproj
+    saying 10.0: `build_plugin.cmd` builds its own `INCLUDE`/`LIB` from the
+    SDK 7.1 install and passes `UseEnv=true`, which bypasses MSBuild's normal
+    Windows 10 SDK auto-resolution entirely.
+  - The SDK 7.1 installer's own installer sometimes picks a different drive
+    root than `C:\Program Files\Microsoft SDKs\Windows\v7.1` (e.g.
+    `D:\Microsoft SDKs\Windows\v7.1`) with no prompt telling you so;
+    `build_plugin.cmd` scans a few drive letters to compensate.
+  - If the installer shows "Some components cannot be installed... setup
+    detected a pre-release version of the .NET Framework 4" - that's a known
+    false positive against any modern (post-4.0) .NET Framework version, not
+    a real problem. Click OK and continue; the skipped components are
+    .NET-dependent SDK samples, not the C++ compiler/headers.
 - [MANUAL] RE_Kenshi 0.3.1+ installed in your Kenshi install
   (`https://www.nexusmods.com/kenshi/mods/847`). Requires a Nexus account /
   Kenshi ownership, so it can't be fetched non-interactively.

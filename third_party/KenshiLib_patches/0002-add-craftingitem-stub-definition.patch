@@ -1,0 +1,37 @@
+KenshiLib_Examples_deps commit e75769b never provides a reconstructed
+definition of `CraftingItem` anywhere - it's only ever forward-declared, in
+kenshi/Building/CraftingBuilding.h. That header also declares a
+`std::deque<CraftingItem, std::allocator<CraftingItem> > crafting;` member,
+which needs a *complete* type to instantiate under MSVC10's STL. A bare
+forward declaration isn't enough, so any translation unit that pulls this
+header in (KenshiCoop's plugin does, via the Building/GameWorld chain) hits
+MSVC error C2027 'CraftingItem': use of undefined type.
+
+Fix: give CraftingItem a minimal empty-class definition in place of the
+forward declaration. Nothing in KenshiCoop touches CraftingItem's members
+(grep the plugin source for "CraftingItem" - no hits), so a stand-in is
+sufficient; this only exists to satisfy the compiler, not to model the real
+type.
+
+Apply from the KenshiCoop repo root after fetching+pinning KenshiLib_deps
+(see README.md in this folder for the fetch/checkout steps):
+
+    git apply third_party/KenshiLib_patches/0002-add-craftingitem-stub-definition.patch
+
+--- a/third_party/KenshiLib_deps/KenshiLib/Include/kenshi/Building/CraftingBuilding.h
++++ b/third_party/KenshiLib_deps/KenshiLib/Include/kenshi/Building/CraftingBuilding.h
+@@ -7,7 +7,13 @@
+ class InventoryLayout;
+ class Faction;
+ class DatapanelGUI;
+-class CraftingItem;
++
++// CraftingItem has no reconstructed definition anywhere in this vendor
++// headers snapshot (KenshiLib_Examples_deps), only ever forward-declared here.
++// A forward declaration isn't a complete type, but std::deque<CraftingItem>
++// below needs one to instantiate under MSVC10's STL. Nothing in this project
++// touches CraftingItem's members, so a minimal stand-in is sufficient.
++class CraftingItem {};
+
+ // TODO move?
+ class GameDataGroup

@@ -28,14 +28,41 @@ popd >nul
 
 set "VS10=C:\Program Files (x86)\Microsoft Visual Studio 10.0"
 set "VC=%VS10%\VC"
+
+REM Windows SDK 7.1's installer lets the user pick any drive; the official
+REM default is "C:\Program Files\Microsoft SDKs\Windows\v7.1" but it's also
+REM commonly found directly off another drive's root (e.g. "D:\Microsoft
+REM SDKs\Windows\v7.1") when that drive was chosen at install time. Try the
+REM default first, then fall back to scanning other drive roots.
 set "SDK=C:\Program Files\Microsoft SDKs\Windows\v7.1"
+if not exist "%SDK%\Include\Windows.h" (
+  for %%D in (C D E F) do (
+    if exist "%%D:\Microsoft SDKs\Windows\v7.1\Include\Windows.h" set "SDK=%%D:\Microsoft SDKs\Windows\v7.1"
+  )
+)
+
 set "KL=%REPO%\third_party\KenshiLib_deps"
 set "ENET=%REPO%\third_party\enet\enet\include"
 
-REM Locate MSBuild via vswhere (falls back to a common path).
+REM Locate MSBuild via vswhere, falling back to scanning known install roots.
+REM vswhere -latest can come back empty even with a complete, registered
+REM instance (seen when Build Tools was installed to a non-default drive
+REM root, e.g. "D:\Microsoft Visual Studio\2022\BuildTools" or a custom
+REM "C:\BuildTools" --installPath) - so don't rely on it alone.
 set "MSBUILD="
 for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" 2^>nul`) do set "MSBUILD=%%i"
-if not defined MSBUILD set "MSBUILD=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+if not defined MSBUILD (
+  for %%P in (
+    "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+    "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+    "C:\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+    "D:\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+    "D:\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+    "C:\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+  ) do (
+    if not defined MSBUILD if exist %%P set "MSBUILD=%%~P"
+  )
+)
 
 REM x64 native toolchain on PATH so cl.exe finds its sibling DLLs (mspdb100, etc).
 set "PATH=%VC%\bin\amd64;%VC%\bin;%VS10%\Common7\IDE;%SDK%\Bin\x64;%SDK%\Bin;%PATH%"
