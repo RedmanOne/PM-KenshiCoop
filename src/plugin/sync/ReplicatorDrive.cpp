@@ -1713,7 +1713,38 @@ void Replicator::applyTargets(GameWorld* gw) {
             snapOk = gapNewest > snapGate * 3.0f &&
                      (!midTier || (now - d.npcSnapTick) >= NPC_SNAP_COOL_MS);
         }
-        if (genuinelyMoving && haveActual && gapNewest > snapGate && snapOk) {
+        // Accounting/classification, computed up front (2026-08-16 coverage-slide
+        // fix) so the snap-vs-slide DECISION can use it, not just the log label.
+        // A snap on a YOUNG ring (< 16 samples, ~0.8 s of 20 Hz coverage) is the
+        // one-time divergence reconciliation of a newly / re-acquired body (Phase
+        // 2 replaces the census park with it). A recent mid->near handoff (raid
+        // entering the 20 Hz bubble) is the same reconciliation debt: divergence
+        // accrued under sparse mid coverage. The clock-slew catch-up window is
+        // the same class again: while timeSlew_ != 1 the join sim runs at a
+        // different wall-clock rate than the host stream, so every divergent
+        // copy legitimately needs reconciliation.
+        bool slewing = timeSlew_ < 0.99f || timeSlew_ > 1.01f;
+        bool coverage = !isSquad &&
+                        (d.interp.samples() < 16 ||
+                         (d.midSeenMs != 0 && (now - d.midSeenMs) < 5000) ||
+                         slewing);
+        // This debt used to be PAID with an instant teleport unconditionally -
+        // "the smoothness oracle already excludes those frames" (measured
+        // acceptable for the oracle's steady-state metric). But measured live
+        // (2026-08-16, manual town session) it fired ~30x/min on an ordinary
+        // scene, gaps mostly 50-160 u, each one a visible pop on a nearby,
+        // clearly-visible body - sampling debt, not a genuine divergence. Below
+        // NPC_COVERAGE_SLIDE_MAX, pay it with the SAME capped-speed catch-up walk
+        // steady-state tracking already uses (falls through to the
+        // "genuinelyMoving" walk branch below) instead of engine::applyRaw - a
+        // fast run into place rather than a pop. Only a genuinely huge gap (a
+        // real warp, or debt accrued over an unusually long mid-tier dwell)
+        // still teleports outright; closing hundreds of units at capped NPC
+        // speed would itself look wrong.
+        const float NPC_COVERAGE_SLIDE_MAX = 200.0f;
+        bool coverageSlide = coverage && gapNewest <= NPC_COVERAGE_SLIDE_MAX;
+        if (genuinelyMoving && haveActual && gapNewest > snapGate && snapOk &&
+            !coverageSlide) {
             // Fell behind / source warped: hard-snap to the true position
             // (no-halt teleport keeps the clip phase advancing).
             engine::applyRaw(c, newest);
@@ -1721,28 +1752,11 @@ void Replicator::applyTargets(GameWorld* gw) {
                 ++hardSnapSquad_;
                 logHardSnap(c, out, "squad", gapNewest, vlen, snapGate, d.haveDest);
             } else {
-                // Accounting: a snap on a YOUNG ring (< 16 samples, ~0.8 s of
-                // 20 Hz coverage) is the one-time divergence reconciliation
-                // of a newly / re-acquired body (Phase 2 replaces the census
-                // park with it) - classed with the mid counter so the
-                // snap-rate gate keeps measuring steady-state tracking only.
-                // A recent mid->near handoff (raid entering the 20 Hz
-                // bubble) is the same reconciliation debt: divergence
-                // accrued under sparse mid coverage, paid with one snap
-                // right after the cadence flips near (run 123101: 'Fuu' gap
-                // 407 on a 20 Hz-classed ring whose history was mid-band).
-                // The clock-slew catch-up window is the same class again:
-                // while timeSlew_ != 1 the join sim runs at a different
-                // wall-clock rate than the host stream, so every divergent
-                // copy legitimately needs reconciliation teleports - the
-                // smoothness oracle already excludes those frames for the
-                // same reason (run 150302: coop_presence spent its whole 25 s
-                // at slew=2.00 and 4 session-start catch-up snaps tripped
-                // the steady-state npc gate).
-                bool slewing = timeSlew_ < 0.99f || timeSlew_ > 1.01f;
-                bool coverage = d.interp.samples() < 16 ||
-                                (d.midSeenMs != 0 && (now - d.midSeenMs) < 5000) ||
-                                slewing;
+                // classed with the mid counter so the snap-rate gate keeps
+                // measuring steady-state tracking only (run 123101: 'Fuu' gap
+                // 407 on a 20 Hz-classed ring whose history was mid-band; run
+                // 150302: coop_presence spent its whole 25 s at slew=2.00 and 4
+                // session-start catch-up snaps tripped the steady-state npc gate).
                 if (midTier || coverage) ++hardSnapMid_;
                 else                     ++hardSnapNpc_;
                 d.npcSnapTick = now;

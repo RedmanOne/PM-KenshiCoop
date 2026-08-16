@@ -80,7 +80,22 @@ static void fillMedicalPacket(MedicalPacket& pkt, const unsigned int subj[5],
     pkt.ownerId = ownerId;
     pkt.sType = subj[0]; pkt.sContainer = subj[1]; pkt.sContainerSerial = subj[2];
     pkt.sIndex = subj[3]; pkt.sSerial = subj[4];
-    pkt.blood     = mr.blood;
+    // Floor blood/flesh/stun at 0 before they ever reach the wire. writeMedical
+    // (EngineSpawnCombat.cpp) treats ANY negative flesh/fleshStun as the "-1 =
+    // owner's field is unreadable, don't touch" sentinel and silently SKIPS
+    // writing that part - but Kenshi's own engine can legitimately read a part's
+    // flesh well below zero (an overkilled part), and the true owner's local
+    // simulation tolerates that fine. Sent raw, that genuine negative value
+    // collided with the wire's sentinel convention: the receiving driven copy's
+    // part just froze at its last >=0 reading (near-zero - critically damaged)
+    // forever, since every subsequent update for that part was silently
+    // dropped. Measured live (2026-08-16, dust-bandit fight -> shop toss): one
+    // part drifted to -48 on the true owner (who stayed conscious throughout)
+    // while its driven copy on the peer, stuck re-reading that frozen near-zero
+    // value every tick, oscillated in and out of unconsciousness for the rest
+    // of the session (22 stand-up/collapse cycles in ~4 minutes) even though
+    // the real owner and the streamed posture both said upright the whole time.
+    pkt.blood     = (mr.blood < 0.0f) ? 0.0f : mr.blood;
     pkt.bleedRate = mr.bleedRate;
     pkt.hunger    = mr.hunger; // -1 when not carried (hungerSync off)
     pkt.fed       = mr.fed;
@@ -94,8 +109,8 @@ static void fillMedicalPacket(MedicalPacket& pkt, const unsigned int subj[5],
         e.used      = pr.used ? 1 : 0;
         e.partType  = pr.partType;
         e.side      = pr.side;
-        e.flesh     = pr.flesh;
-        e.fleshStun = pr.fleshStun;
+        e.flesh     = (pr.flesh     < 0.0f) ? 0.0f : pr.flesh;
+        e.fleshStun = (pr.fleshStun < 0.0f) ? 0.0f : pr.fleshStun;
         e.bandaging = pr.bandaging;
         e.juryRig   = pr.juryRig;
     }
