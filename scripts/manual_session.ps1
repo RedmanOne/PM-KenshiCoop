@@ -283,13 +283,25 @@ if (-not $SkipBuild) {
 if (-not $SkipDeploy) {
     Write-Host ""
     Write-Host "=== deploy ==="
-    & cmd /c "`"$scriptDir\deploy.cmd`""
-    if ($LASTEXITCODE -ne 0) { throw "deploy.cmd failed ($LASTEXITCODE)" }
+    # deploy.cmd with NO argument only ever reaches the Steam default path (plus
+    # its own hardcoded %USERPROFILE%\Kenshi-Join fallback) - it never looks at
+    # -HostDir/-JoinDir, so a custom pair of install folders (anything other than
+    # those two defaults) silently kept running whatever stale DLL was already
+    # there. Deploy explicitly to BOTH configured installs instead, always Harness
+    # (this project does not build/deploy Release from here).
+    & cmd /c "`"$scriptDir\deploy.cmd`" `"$HostDir`" Harness"
+    if ($LASTEXITCODE -ne 0) { throw "deploy.cmd failed for HostDir ($LASTEXITCODE)" }
+    if (-not $NoJoin -and $JoinDir -ne $HostDir) {
+        & cmd /c "`"$scriptDir\deploy.cmd`" `"$JoinDir`" Harness"
+        if ($LASTEXITCODE -ne 0) { throw "deploy.cmd failed for JoinDir ($LASTEXITCODE)" }
+    }
     # Surface exactly which DLL is now deployed so we never validate a stale build.
-    $deployed = Join-Path $HostDir "mods\KenshiCoop\KenshiCoop.dll"
-    if (Test-Path $deployed) {
-        $info = Get-Item $deployed
-        Write-Host ("  deployed DLL: {0}  ({1:yyyy-MM-dd HH:mm:ss}, {2} bytes)" -f $deployed, $info.LastWriteTime, $info.Length)
+    foreach ($dir in (@($HostDir, $JoinDir) | Select-Object -Unique)) {
+        $deployed = Join-Path $dir "mods\KenshiCoop\KenshiCoop.dll"
+        if (Test-Path $deployed) {
+            $info = Get-Item $deployed
+            Write-Host ("  deployed DLL: {0}  ({1:yyyy-MM-dd HH:mm:ss}, {2} bytes)" -f $deployed, $info.LastWriteTime, $info.Length)
+        }
     }
 } else {
     Write-Host ""

@@ -1220,6 +1220,12 @@ bool isNodeAnchoredPose(int taskKey);
 // maps before ordering the pose on the peer.
 bool isBuildSiteTask(int taskKey);
 
+// True if 'taskKey' is a silent takedown (STEALTH_KNOCKOUT / STEALTH_KILL) - the
+// assassinate windup/approach pose (2026-08-16 assassinate sync). Exposed so the
+// sync layer's diagnostics can classify a streamed rawTask without pulling in
+// kenshi/Enums.h.
+bool isAssassinateTask(int taskKey);
+
 // AI-gating probe lever: recruit a world NPC into the local player's squad (the
 // "inhabit" path) so it stops self-assigning town tasks and obeys our drive.
 // Join-side only. Returns the engine's recruit() result (false if unresolved).

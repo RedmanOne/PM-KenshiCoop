@@ -167,6 +167,16 @@ struct Config {
     // design direction. Changes no behavior.
     bool         taskSelectSpike;    // KENSHICOOP_TASK_SPIKE           (off)
 
+    // KENSHICOOP_DEBUG_MARKERS (default OFF; "debugMarkers" in coop_config.json):
+    // pops a floating colored ScreenLabel over a character for the debug-marker
+    // HUD (Replicator::debugMark + the assassinate-sync task-key diagnostic in
+    // publishOwned/applyTargets). Routed through the config file - unlike most
+    // KENSHICOOP_* knobs this one is meant to be flipped by a player on a normal
+    // Steam-launched game, where setting a process env var is impractical - so
+    // loadConfig() also _putenv()s the resolved value, letting every existing
+    // getenv("KENSHICOOP_DEBUG_MARKERS") call site keep working unchanged.
+    bool          debugMarkers;
+
     // Jail put-to-work desync spike: emit correlated [jail] STATE traces for
     // captive bodies (owned PC in publishOwned, driven copy in applyTargets) so
     // the twitch (brief cage-exit then re-cage) can be pinned. Read-only.

@@ -84,6 +84,16 @@ bool isReproduciblePose(int t) {
         case JOB_MEDIC:
         case FIRST_AID_ROBOT:
         case JOB_REPAIR_ROBOT:
+        // Silent takedown poses (2026-08-16 assassinate sync). Like a medic action
+        // the SUBJECT is the VICTIM (a character), not a building. Assassinations
+        // bypass hitByMeleeAttack/combatModeActive entirely (see the knockout-hook
+        // comment in Engine.h), so the Stage 3c combat-override block never fires
+        // for them - this pose path is the ONLY thing that streams the windup/
+        // approach at all. Without it the join never sees the sneak-up-and-strike
+        // animation and only learns the outcome once EVT_KNOCKOUT/EVT_DEATH lands.
+        // STEALTH_KNOCKOUT = silent KO; STEALTH_KILL = lethal sneak attack.
+        case STEALTH_KNOCKOUT:
+        case STEALTH_KILL:
             return true;
         default:
             return isBuildSiteTaskImpl(t);

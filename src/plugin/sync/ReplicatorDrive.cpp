@@ -1148,6 +1148,56 @@ void Replicator::applyTargets(GameWorld* gw) {
             if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
             continue;
         }
+        // ---- Assassinate override (silent-takedown windup, 2026-08-16) --------
+        // STEALTH_KNOCKOUT/STEALTH_KILL is a walk-up-and-strike action like melee
+        // combat above, NOT a stationary rest pose: the attacker is still MOVING
+        // right up to the takedown. applyRest's "genuinely moving" gate (below,
+        // the ordinary walk/rest fork) never releases while that's true, so the
+        // task-order apply added for this never actually fired - the copy just
+        // rode the plain position-drive the whole time and the windup never
+        // reproduced (confirmed via a live session: host log showed the raw task
+        // captured correctly but no matching applyOrder call, while the driven
+        // copy visibly just walked in place). Fix: give it the same early,
+        // movement-independent apply as combat, reusing the combat episode
+        // fields (mutually exclusive task values, so no collision) - one-shot,
+        // no slot-rotation/backoff needed, just (re-)issue once per target and
+        // let the local engine own the walk-in + strike. The shared hold/disarm
+        // block right below then releases it back to ordinary drive once the
+        // host stops streaming the task.
+        if (engine::isAssassinateTask((int)out.task)) {
+            if (!isSquad && !d.detached) d.detached = engine::detachFromTownAI(c);
+            bool tgtChanged = d.combatArmed &&
+                (d.combatTgtIdx != out.sIndex || d.combatTgtSer != out.sSerial);
+            // Retry on a NON-success return (r=1 fixture-not-loaded-here is common
+            // right when the victim's stream first arrives - the local resolve can
+            // lag a tick or two): only a genuine r=2 latches combatArmed, so a
+            // failure keeps retrying (throttled, not every tick) instead of
+            // silently giving up after one failed attempt forever (2026-08-16 live
+            // session: the first order landed r=1 and, with the old unconditional
+            // latch, was never retried).
+            bool retryDue = !d.combatArmed &&
+                (d.combatTick == 0 || (now - d.combatTick) >= 250);
+            if (tgtChanged || retryDue) {
+                int r = engine::applyTaskOrder(c, out);
+                d.combatArmed = (r == 2);
+                d.combatTick = now; d.combatSeenTick = now;
+                d.combatTgtIdx = out.sIndex; d.combatTgtSer = out.sSerial;
+                if (d.combatOrders < 1000000u) ++d.combatOrders;
+                char b[176]; _snprintf(b, sizeof(b) - 1,
+                    "[assassinate] APPLY hand=%u,%u tgt=%u,%u task=%u r=%d n=%u",
+                    out.hIndex, out.hSerial, out.sIndex, out.sSerial,
+                    (unsigned)out.task, r, d.combatOrders);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                char tag[24]; _snprintf(tag, sizeof(tag) - 1, "ASSASSINATE-RX r%d", r);
+                tag[sizeof(tag) - 1] = '\0';
+                debugMark(c, r == 2 ? 0 : 1, tag);
+            } else {
+                d.combatSeenTick = now; // still in progress: feed the hold debounce
+            }
+            d.parked = false;
+            if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
+            continue;
+        }
         // Host no longer reports combat for this body. The stance rides the LOSSY
         // entity batch and the engine's own combat read blips off mid-fight, so a
         // short gap is NOISE: hold the fight (skip the rest-drive entirely) and
@@ -2296,6 +2346,10 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
                 out.sIndex, out.sSerial, d.detached ? 1 : 0, r,
                 d.taskRetries);
               b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
+            // NOTE: assassinate tasks (STEALTH_KNOCKOUT/STEALTH_KILL) no longer
+            // reach this branch - the movement-independent block above catches
+            // them before the walk/rest fork, since applyRest only runs once a
+            // body is classified at rest and an approaching attacker never is.
             if (r == 2) { d.taskApplied = true; d.taskRetries = 0; } // posed at the fixture
             else if (r == 1) d.taskBad = true; // fixture not loaded here -> park
             else if (r == 3) {

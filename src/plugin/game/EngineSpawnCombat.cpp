@@ -1591,6 +1591,22 @@ static bool isMedicTask(int task) {
     }
 }
 
+// True if a reproduced task is a silent takedown (2026-08-16 assassinate sync).
+// Same shape as isMedicTask: the subject is the VICTIM (a character), not a
+// building, so it is ordered with dest=NULL and trusted by identity rather than
+// distance-gated (a driven victim's copy may be mid-motion, like a patient).
+// Public (declared in Engine.h) so the sync layer's diagnostics can classify a
+// streamed rawTask without needing kenshi/Enums.h.
+bool isAssassinateTask(int task) {
+    switch (task) {
+        case STEALTH_KNOCKOUT:
+        case STEALTH_KILL:
+            return true;
+        default:
+            return false;
+    }
+}
+
 int applyTask(Character* c, const EntityState& e) {
     if (e.task == TASK_NONE) return 0;
     if (!c || !g_handGetRootFn || !g_handCtorFn) return 0;
@@ -1622,7 +1638,8 @@ int applyTask(Character* c, const EntityState& e) {
             // Seats: reject a far (mis-resolved) prop. Work fixtures + medic (patient)
             // subjects: trusted by identity - a large mine's origin sits far from its
             // operate spot, and a patient's driven copy may be mid-motion.
-            bool identityTrusted = isWorkFixtureTask((int)e.task) || isMedicTask((int)e.task);
+            bool identityTrusted = isWorkFixtureTask((int)e.task) || isMedicTask((int)e.task) ||
+                                   isAssassinateTask((int)e.task);
             if (!coop::poseFixtureAcceptedSq(identityTrusted, dx * dx + dz * dz))
                 return 3; // fixture resolved but it's the WRONG (far) one -> park
         }
@@ -1690,24 +1707,29 @@ int applyTaskOrder(Character* c, const EntityState& e) {
         RootObject* target = g_handGetRootFn(h);
         if (!target) return 1; // fixture not loaded here -> caller idle-parks
         Ogre::Vector3 loc = target->getPosition(); // virtual: safe direct call
-        bool medic = isMedicTask((int)e.task);
+        // charSubject: the subject is a CHARACTER (patient or assassination
+        // victim), not a building - both order with dest=NULL and are trusted by
+        // identity rather than distance-gated.
+        bool charSubject = isMedicTask((int)e.task) || isAssassinateTask((int)e.task);
         {
             float dx = loc.x - e.x, dz = loc.z - e.z;
-            // Seats: reject a far (mis-resolved) prop. Work fixtures + medic (patient)
-            // subjects: trusted by identity - a large mine's origin sits far from its
-            // operate spot, and a patient's driven copy may be mid-motion.
-            if (!coop::poseFixtureAcceptedSq(isWorkFixtureTask((int)e.task) || medic,
+            // Seats: reject a far (mis-resolved) prop. Work fixtures + character
+            // (patient/victim) subjects: trusted by identity - a large mine's
+            // origin sits far from its operate spot, and a driven patient/victim
+            // copy may be mid-motion.
+            if (!coop::poseFixtureAcceptedSq(isWorkFixtureTask((int)e.task) || charSubject,
                                              dx * dx + dz * dz))
                 return 3; // resolved the WRONG (far) fixture -> caller parks in place
         }
         if (g_clearGoalsFn) g_clearGoalsFn(c);
         // Player-order to the EXACT fixture + location. A seat/machine IS a Building,
-        // so it doubles as the order destination. A medic subject is the PATIENT (a
-        // character, not a building), so order it with dest=NULL - the same form a
-        // player's right-click First Aid issues (mirrors orderMeleeAttackViaOrder).
+        // so it doubles as the order destination. A medic or assassinate subject is
+        // a CHARACTER (patient or victim), not a building, so order it with
+        // dest=NULL - the same form a player's right-click First Aid / sneak-attack
+        // issues (mirrors orderMeleeAttackViaOrder).
         // clear=true drops prior orders.
         if (g_addOrderFn) {
-            Building* dest = medic ? 0 : reinterpret_cast<Building*>(target);
+            Building* dest = charSubject ? 0 : reinterpret_cast<Building*>(target);
             g_addOrderFn(c, dest, (int)e.task, target, /*shift*/false,
                          /*clear*/true, &loc);
         } else if (g_addJobFn) {

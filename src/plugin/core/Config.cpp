@@ -406,6 +406,16 @@ void loadConfig(Config& c) {
         c.starveHoldMs = (shv > 0) ? (unsigned int)shv : 0u;
     }
 
+    // Debug marker HUD: file-configurable (see Config.h) since it is meant to be
+    // toggled by a player on a normal Steam launch, not just a test harness.
+    // _putenv so debugMark's own lazy getenv() picks it up without plumbing
+    // Config through the sync layer.
+    {
+        std::string dm = envOr("KENSHICOOP_DEBUG_MARKERS", fileOr(f, "debugMarkers", "0").c_str());
+        c.debugMarkers = (dm == "1" || dm == "true"); // JSON bool reads as the bareword "true"
+    }
+    _putenv(c.debugMarkers ? "KENSHICOOP_DEBUG_MARKERS=1" : "KENSHICOOP_DEBUG_MARKERS=0");
+
     int delay  = std::atoi(envOr("KENSHICOOP_NETSIM_DELAY_MS", "0").c_str());
     int jitter = std::atoi(envOr("KENSHICOOP_NETSIM_JITTER_MS", "0").c_str());
     int loss   = std::atoi(envOr("KENSHICOOP_NETSIM_LOSS_PCT", "0").c_str());
@@ -458,6 +468,7 @@ std::string describeConfig(const Config& c) {
         { "latejoin",c.latejoinSync }, { "aiSuspend", c.aiSuspend },
         { "gateAuth",c.gateAuthority },{ "camInterest", c.camInterest },
         { "censusFreezeAi", c.censusFreezeAi },
+        { "debugMarkers", c.debugMarkers },
     };
     s += " on=[";
     bool first = true;

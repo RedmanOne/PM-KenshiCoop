@@ -1263,6 +1263,18 @@ void __fastcall knockout_hook(MedicalSystem* self, float skill) {
     }
     g_knockoutOrig(self, skill);
     if (victim) g_reportedKnockouts[victim] = skill;
+    // DIAGNOSTIC (2026-08-16, assassinate sync): this hook is the sole edge that
+    // reports a knockout to the host - if it never finds the victim in
+    // g_damageGuarded (e.g. the victim is a squad member, a class this guard set
+    // may not cover the same way it covers world-NPC copies), the result never
+    // crosses the wire regardless of whether the windup animation did. Always
+    // logs (cheap, one-shot per real knockout) so this is visible without
+    // needing KENSHICOOP_DEBUG_MARKERS.
+    { char b[160]; _snprintf(b, sizeof(b) - 1,
+        "[dmg] knockout_hook fired self=%p skill=%.2f report=%d suppress=%d victimFound=%d guarded=%u",
+        (void*)self, skill, g_combatReport ? 1 : 0, g_suppressKnockoutReport ? 1 : 0,
+        victim ? 1 : 0, (unsigned)g_damageGuarded.size());
+      b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
 }
 
 HitMaterialType __fastcall hitByMelee_hook(Character* self, CutDirection dir,
