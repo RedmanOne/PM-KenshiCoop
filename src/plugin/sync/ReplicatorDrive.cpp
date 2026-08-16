@@ -846,6 +846,22 @@ void Replicator::applyTargets(GameWorld* gw) {
         if (d.downApplied) {
             engine::knockDown(c, false); // host says upright again -> stand back up
             d.downApplied = false;
+            // The engine destroys the physics/render character on collapse and
+            // re-creates it when the body's OWN AI stands it back up. This driven
+            // copy is AI-suspended the whole time it's down (it never runs that
+            // recovery itself), so releasing the ragdoll alone leaves it without
+            // one: CharMovement::pos (getPosition, the nametag, every position
+            // oracle) keeps tracking the host normally, but the rendered mesh has
+            // no controller to move it and stays frozen at the collapse spot -
+            // "gets up on the host but the model stays put on the peer" (first
+            // found and fixed the same way on the crawl path, protocol 53's
+            // CRAWL-PHYS restore below; a full stand-up revive hits the identical
+            // gap, just without the crippled/crawling condition that path gates on).
+            if (!engine::hasPhysicsBody(c) && engine::restoreMovement(c)) {
+                char b[160]; _snprintf(b, sizeof(b) - 1,
+                    "[revive] PHYS-RESTORE hand=%u,%u", out.hIndex, out.hSerial);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
         }
 
         // ---- Stealth posture (protocol 20) -------------------------------------
