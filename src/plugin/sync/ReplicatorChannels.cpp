@@ -388,8 +388,34 @@ void Replicator::applyTreatments(GameWorld* gw, Inbound& in) {
         // (log-visible, ignored).
         bool authority = ownHands_.find(k) != ownHands_.end() ||
                          (streamNpcs_ && medNpc_.find(k) != medNpc_.end());
+        Character* c = 0;
+        if (!authority && streamNpcs_) {
+            // medNpc_ only tracks a world NPC while it's fighting, recently
+            // fought, or down (publishOwned's Phase B qualification) - a
+            // conscious, wounded NPC being bandaged well after its fight ended
+            // ages out of that window (MEDNPC_STALE_MS = 10s) and every
+            // treatment for it silently hit the drop above from then on: the
+            // owner's real body froze at its last synced value (no more TREAT
+            // RECV ever applied) while the healer's driven copy - still getting
+            // real local first-aid from Kenshi's own engine, just with nothing
+            // left to reconcile it against - drifted on its own local
+            // simulation (a peer reported a chest at -53 the owner's screen
+            // still showed at -2). A live treatment for a body we can still
+            // resolve is itself proof it's still relevant: reclaim authority
+            // and re-arm the vitals stream so publishOwned picks it back up
+            // next tick, instead of dropping every packet for a body that
+            // quietly aged out mid-treatment.
+            c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+            if (c) {
+                medNpc_[k] = nowMs();
+                authority = true;
+                char rb[128]; _snprintf(rb, sizeof(rb) - 1,
+                    "[med] TREAT REARM hand=%u,%u", k.i, k.s);
+                rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+            }
+        }
         if (!authority) continue;
-        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!c) c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
         if (!c) continue;
         int n = engine::applyBandageParts(c, p.partBand);
         char b[160]; _snprintf(b, sizeof(b) - 1,
