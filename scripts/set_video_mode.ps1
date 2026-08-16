@@ -5,15 +5,19 @@
 .DESCRIPTION
   Kenshi reads its window size from kenshi.cfg ("Video Mode=W x H @ 32-bit
   colour [0]"); the window tiler (arrange_windows.ps1) only MOVES windows, so
-  the size each session wants must be written here before launch.   The two
+  the size each session wants must be written here before launch. The two
   harnesses call this with their own layout:
-    * manual_session.ps1 -> ultrawide layout (3440x1440 split into two
-      side-by-side windows; 1720x1440 client fills the ultrawide edge-to-edge,
-      2x1720 = 3440 wide at full 1440 height)
+    * manual_session.ps1 -> plain windowed default (1080x720 per client, no
+      auto-positioning - see -WindowW/-WindowH there). Pass -Tile to that
+      script for host-left/join-right auto-positioning instead, with a
+      smaller -WindowW sized for the target monitor's actual width.
     * run_test.ps1       -> automated layout (1280x1024 pair on the laptop
       primary monitor, the long-standing screenshot-stable baseline)
   Idempotent: only rewrites a cfg whose current mode differs. Also enforces
-  windowed mode (Full Screen=No), which side-by-side placement requires.
+  windowed mode (Full Screen=No).
+
+  This machine's real displays are two ~1920px-wide screens, not one wide
+  ultrawide panel - don't assume a 3440-class monitor when picking a size.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\set_video_mode.ps1 -Width 1700 -Height 1350

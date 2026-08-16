@@ -165,22 +165,39 @@ param(
     # observing side (a diagnostic divergence, NOT a real desync). Do NOT use for
     # parity/visual A-B; use plain -JailProbe for that.
     [switch]$JailObserve,
-    # Manual sessions tile the two game windows side-by-side BY DEFAULT (host left,
-    # join right; scripts\arrange_windows.ps1, re-pinned through the load screen) on
-    # the ULTRAWIDE (widest monitor, 3440x1440): each client window is sized to half
-    # the ultrawide via kenshi.cfg Video Mode (set_video_mode.ps1) so visual A/B
-    # validation FILLS the screen. -NoTile skips both the resize and the tiling.
-    # (-Tile is legacy/accepted; tiling is on unless -NoTile.)
+    # Manual sessions default to plain windowed clients (host + join both sized
+    # WindowW x WindowH below) with NO automatic resize-to-fit-a-monitor and NO
+    # auto-positioning - you place/move them yourself. This machine's real
+    # displays are two ~1920px-wide screens (not one wide ultrawide panel), and
+    # the two hardcoded layouts that assumed a single 3440x1440 ultrawide
+    # (1720x1440 windows, tiled side-by-side to fill it) routinely overflowed
+    # both real monitors - "windows are huge and I can't move them" - and every
+    # session (this one included) re-guessed the same wrong fix from scratch,
+    # since kenshi.cfg lives outside the repo with no git history to check
+    # against. Pass -Tile to opt INTO scripts\arrange_windows.ps1's host-left/
+    # join-right auto-positioning on the widest (or -TileMonitor primary)
+    # monitor - but note the DEFAULT WindowW/WindowH below aren't sized for
+    # that (two side-by-side would need roughly half a monitor's width each);
+    # shrink -WindowW when combining with -Tile so the pair actually fits one
+    # screen edge-to-edge. -NoTile is accepted for backwards compatibility but
+    # is a no-op now (no auto-tile is already the default).
     [switch]$Tile,
     [switch]$NoTile,
+    # Skip writing WindowW/WindowH into kenshi.cfg at all (leave the installs'
+    # current Video Mode alone). Independent of -Tile/-NoTile: sizing the
+    # window and auto-positioning it are separate steps, unlike the old
+    # tile-bundled resize.
+    [switch]$NoResize,
     [ValidateSet("widest", "primary")]
     [string]$TileMonitor = "widest",
-    # Client (render area) size per window for the manual layout: 1720x1440 fills the
-    # 3440x1440 ultrawide edge-to-edge (2x1720 = 3440 wide, full 1440 height). This is
-    # the MANUAL-only resolution; automated runs (run_test.ps1) keep the smaller
-    # 1280x1024 primary-monitor layout, so the two harnesses never fight over the cfg.
-    [int]$WindowW = 1720,
-    [int]$WindowH = 1440,
+    # Client (render area) size per window. 1080x720 comfortably fits ONE window
+    # per monitor on this machine's actual ~1920x1080 / ~1920x1200 displays with
+    # room to spare (not edge-to-edge, easily movable). Automated runs
+    # (run_test.ps1) always reset to their own 1280x1024 primary-monitor layout
+    # regardless of what's set here - see that script's video-mode step - so
+    # the two harnesses never need to agree on a shared size.
+    [int]$WindowW = 1080,
+    [int]$WindowH = 720,
     # How long to keep re-pinning. Must outlast host launch + join delay + both load
     # screens (Kenshi re-centers on gameplay entry), matching run_test.ps1's default.
     [int]$TileRepeatSec = 75
@@ -189,8 +206,9 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Tiling is the manual-session default; -NoTile opts out (-Tile kept for compat).
-$doTile = -not $NoTile
+# No auto-tile by default; -Tile opts IN. -NoTile is accepted (no-op) for
+# backwards compatibility with callers that still pass it.
+$doTile = $Tile -and -not $NoTile
 
 $hostExe = Join-Path $HostDir "kenshi_x64.exe"
 $joinExe = Join-Path $JoinDir "kenshi_x64.exe"
@@ -308,14 +326,19 @@ if (-not $SkipDeploy) {
     Write-Host "=== deploy SKIPPED (-SkipDeploy): installs keep their current DLL ==="
 }
 
-# Size both clients for the manual layout BEFORE launch (Kenshi reads kenshi.cfg
-# Video Mode at startup; the tiler only moves). run_test.ps1 writes the automated
-# layout back on its next run, so the two harnesses never fight over the cfg.
-if ($doTile) {
+# Size both clients BEFORE launch (Kenshi reads kenshi.cfg Video Mode at
+# startup; the tiler only moves) - independent of -Tile, so the correct
+# windowed size lands even when you're placing the windows yourself.
+# run_test.ps1 writes its own automated layout back on its next run, so the
+# two harnesses never fight over the cfg.
+if (-not $NoResize) {
     Write-Host ""
-    Write-Host "=== window layout: manual (${WindowW}x${WindowH} x2, $TileMonitor monitor) ==="
+    Write-Host "=== window size: ${WindowW}x${WindowH} per client ==="
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptDir "set_video_mode.ps1") `
         -Width $WindowW -Height $WindowH -HostDir $HostDir -JoinDir $JoinDir
+}
+if ($doTile) {
+    Write-Host "=== auto-tile: host-left / join-right on the $TileMonitor monitor ==="
 }
 
 if ($Sync -and $TitleScreen) {
