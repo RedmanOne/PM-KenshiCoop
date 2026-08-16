@@ -271,6 +271,26 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         // engage (the posture apply in applyTargets is the other half).
         w.crippled    = (p.flags & MED_CRIPPLED) != 0;
         engine::writeMedical(c, w);
+        // Receive-side mirror of the "[med] SEND" log (2026-08-16, healthbar-sync
+        // diagnosis): applyMedical previously never logged anything on a
+        // successful (or failed-resolve) apply, so a session capture could show
+        // the host sending vitals for a fought world NPC but gave no way to tell
+        // whether the join actually received/wrote them - the exact ambiguity
+        // that blocked diagnosing "bodypart healthbars don't sync". Logged at
+        // the same ~1 Hz cadence the sender already throttles to.
+        {
+            float minFl = 1e9f;
+            for (unsigned int i = 0; i < n; ++i) {
+                if (!w.parts[i].used) continue;
+                if (w.parts[i].flesh >= 0.0f && w.parts[i].flesh < minFl)
+                    minFl = w.parts[i].flesh;
+            }
+            if (minFl > 1e8f) minFl = -1.0f;
+            char mb[192]; _snprintf(mb, sizeof(mb) - 1,
+                "[med] RECV hand=%u,%u blood=%.1f nparts=%u pmin=%.1f",
+                k.i, k.s, p.blood, n, minFl);
+            mb[sizeof(mb) - 1] = '\0'; coop::logLine(mb);
+        }
         // Limb-state self-heal (Phase C/D): reconcile stump/crushed/robotic
         // state with the owner's. The reliable EVT_AMPUTATE/EVT_CRUSH events
         // carry the transition moment; this closes any gap (late join, missed

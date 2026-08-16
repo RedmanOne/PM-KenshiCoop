@@ -148,14 +148,26 @@ bool EntityInterp::latest(EntityState* out, float* vx, float* vy, float* vz) con
     out->heading = newest.heading;
     if (vx || vy || vz) {
         float ex = 0.0f, ey = 0.0f, ez = 0.0f;
-        if (count_ >= 2) {
-            const Snap& prev = at(count_ - 2);
-            float dt = (float)(newest.t - prev.t);
-            if (dt > 0.0f) {
-                ex = (newest.x - prev.x) * 1000.0f / dt; // units per second
-                ey = (newest.y - prev.y) * 1000.0f / dt;
-                ez = (newest.z - prev.z) * 1000.0f / dt;
-            }
+        // Require a minimum baseline before trusting the derivative: two
+        // samples only a couple ms apart (near/mid-band overlap, a retransmit)
+        // divide a small, ordinary position delta by a near-zero dt and produce
+        // a spurious triple-digit u/s spike (measured live: 117-148 u/s off an
+        // NPC that never moved anywhere near that fast). That bogus velocity
+        // feeds the combat-drift srcVel gate and the walk-drive lead point, so
+        // one noisy sample pair could fire an unwarranted teleport-snap. Walk
+        // back through the ring for the nearest sample at least MIN_VEL_DT_MS
+        // older than the newest; on the healthy 20 Hz near band (50 ms spacing)
+        // the immediate previous sample already clears this, so behavior is
+        // unchanged there.
+        const unsigned long MIN_VEL_DT_MS = 40;
+        for (int i = count_ - 2; i >= 0; --i) {
+            const Snap& prev = at(i);
+            unsigned long dt = newest.t - prev.t;
+            if (dt < MIN_VEL_DT_MS) continue;
+            ex = (newest.x - prev.x) * 1000.0f / (float)dt;
+            ey = (newest.y - prev.y) * 1000.0f / (float)dt;
+            ez = (newest.z - prev.z) * 1000.0f / (float)dt;
+            break;
         }
         if (vx) *vx = ex;
         if (vy) *vy = ey;

@@ -917,6 +917,28 @@ void Replicator::applyTargets(GameWorld* gw) {
                     "[prone] APPLY hand=%u,%u want=%u was=%d ok=%d",
                     out.hIndex, out.hSerial, (unsigned)want, local, ok ? 1 : 0);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                // Stuck-KO recovery (2026-08-16, dust-bandit fight desync). This
+                // block's own comment above assumes PS_KO/PS_PLAYING_DEAD are the
+                // down path's property, caught by bodyIsDown(out.bodyState) before
+                // execution ever reaches here - but a driven copy's LOCAL physics/
+                // collapse state can enter PS_KO on its own, independent of what
+                // the owner streams. Measured live: the owner streamed upright
+                // (want=0) the entire time while this copy read local=4 (PS_KO)
+                // continuously for 3+ minutes - applyProneState "succeeded" on
+                // every ~1 Hz retry but never stuck, because a bare setProneState
+                // does not release the underlying collapse (the same destroyed-
+                // physics-body gap the down path's stand-up revive handles via
+                // knockDown(false) + hasPhysicsBody/restoreMovement, PHYS-RESTORE
+                // above). Run that same recovery here so a copy that fell into
+                // PS_KO off-stream isn't left fighting the apply forever.
+                if (local == PRONE_KO || local == PRONE_PLAYING_DEAD) {
+                    engine::knockDown(c, false);
+                    if (!engine::hasPhysicsBody(c) && engine::restoreMovement(c)) {
+                        char rb[128]; _snprintf(rb, sizeof(rb) - 1,
+                            "[revive] PHYS-RESTORE hand=%u,%u", out.hIndex, out.hSerial);
+                        rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+                    }
+                }
             }
         }
 
