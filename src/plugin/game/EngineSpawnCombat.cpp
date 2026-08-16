@@ -1988,6 +1988,35 @@ int applyBandageParts(Character* c, const float band[12]) {
     return n;
 }
 
+// Protocol 57: raise-only FLESH apply keyed by ANATOMY index, the applyBandageParts
+// twin for the healer's already-realized flesh gain (TreatmentPacket::partFlesh).
+// Without this, the owner's real flesh only rose through its own slow passive
+// bandaging->flesh regen, lagging what the healer's local applyFirstAid pass had
+// already put on screen - the next vitals snapshot from the (still-low) owner then
+// snapped the healer's screen back down, every publish tick.
+int applyFleshParts(Character* c, const float flesh[12]) {
+    if (!c || !flesh) return 0;
+    int n = 0;
+    __try {
+        MedicalSystem* med = &c->medical;
+        unsigned int cnt = med->anatomy.count;
+        if (cnt > 12) cnt = 12;
+        for (unsigned int i = 0; i < cnt; ++i) {
+            if (flesh[i] < 0.0f) continue;
+            MedicalSystem::HealthPartStatus* p =
+                med->anatomy.stuff ? med->anatomy.stuff[i] : 0;
+            if (!p) continue;
+            // Raise-only (idempotent) - see applyBandageParts.
+            float lvl = flesh[i];
+            if (lvl > p->_maxHealth) lvl = p->_maxHealth;
+            if (p->flesh < lvl) { p->flesh = lvl; ++n; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return n;
+}
+
 // SEH-guarded: fabricate a robotic-limb item from its LIMB_REPLACEMENT template
 // stringID (blank handle - the factory owns the id; the same pattern as
 // createItemAndAdd, but the item goes to setRobotLimbItem, not an inventory).

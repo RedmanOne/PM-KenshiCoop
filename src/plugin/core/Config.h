@@ -299,8 +299,11 @@ struct Config {
     // authoritative vitals stream for player-squad members (blood, bleed,
     // per-limb flesh + bandaging onto the peer's driven copies, change-gated
     // reliable) + treatment forwarding (first aid administered on a driven copy
-    // returns to the body's owner as a raise-only bandage delta). World NPCs
-    // stay on the events-only model. "0" is the A/B escape hatch.
+    // returns to the body's owner as a raise-only bandage AND flesh delta -
+    // protocol 57 added flesh so the owner's real body catches up to what the
+    // healer's screen already showed instead of the vitals echo snapping it
+    // back down every publish tick). World NPCs stay on the events-only model.
+    // "0" is the A/B escape hatch.
     bool          medSync;
 
     // Consensus game-speed sync (KENSHICOOP_SPEED_SYNC != "0"; DEFAULT ON):

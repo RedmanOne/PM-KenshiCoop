@@ -296,6 +296,11 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
             // forwarded; re-arm the detector against the new baseline.
             if (r.sentBand[i] >= 0.0f && band >= r.sentBand[i] - 0.25f)
                 r.sentBand[i] = -1.0f;
+            // Protocol 57: same re-arm for the flesh baseline.
+            float flesh = (i < n && p.parts[i].used) ? p.parts[i].flesh : -1.0f;
+            r.recvFlesh[i] = flesh;
+            if (r.sentFlesh[i] >= 0.0f && flesh >= r.sentFlesh[i] - 0.25f)
+                r.sentFlesh[i] = -1.0f;
         }
         r.have = true;
     }
@@ -320,16 +325,32 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         memset(&tp, 0, sizeof(tp));
         bool rise = false;
         int nRise = 0; float hiBand = -1.0f;
+        // Protocol 57: flesh rides the same detector as bandaging - the
+        // healer's local applyFirstAid raises BOTH on the driven copy, but
+        // only bandaging used to forward, so the owner's real flesh only
+        // caught up via its own slow passive regen and every vitals echo
+        // snapped the healer's already-healed screen back down.
+        int nFleshRise = 0; float hiFlesh = -1.0f;
         for (unsigned int i = 0; i < 12; ++i) {
             tp.partBand[i] = -1.0f;
             float local = (i < mr.nParts && mr.parts[i].used) ? mr.parts[i].bandaging : -1.0f;
-            if (local < 0.0f || r.recvBand[i] < 0.0f) continue;
-            if (local > r.recvBand[i] + RISE_EPS &&
+            if (local >= 0.0f && r.recvBand[i] >= 0.0f &&
+                local > r.recvBand[i] + RISE_EPS &&
                 (r.sentBand[i] < 0.0f || local > r.sentBand[i] + RISE_EPS)) {
                 tp.partBand[i] = local;
                 r.sentBand[i]  = local;
                 rise = true; ++nRise;
                 if (local > hiBand) hiBand = local;
+            }
+            tp.partFlesh[i] = -1.0f;
+            float localFlesh = (i < mr.nParts && mr.parts[i].used) ? mr.parts[i].flesh : -1.0f;
+            if (localFlesh >= 0.0f && r.recvFlesh[i] >= 0.0f &&
+                localFlesh > r.recvFlesh[i] + RISE_EPS &&
+                (r.sentFlesh[i] < 0.0f || localFlesh > r.sentFlesh[i] + RISE_EPS)) {
+                tp.partFlesh[i] = localFlesh;
+                r.sentFlesh[i]  = localFlesh;
+                rise = true; ++nFleshRise;
+                if (localFlesh > hiFlesh) hiFlesh = localFlesh;
             }
         }
         if (!rise) continue;
@@ -344,6 +365,12 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
             "[med] TREAT SEND id=%u hand=%u,%u parts=%d hi=%.1f",
             tp.treatId, k.i, k.s, nRise, hiBand);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        if (nFleshRise > 0) {
+            char fb[160]; _snprintf(fb, sizeof(fb) - 1,
+                "[med] TREAT FLESH SEND id=%u hand=%u,%u parts=%d hi=%.1f",
+                tp.treatId, k.i, k.s, nFleshRise, hiFlesh);
+            fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
+        }
     }
 }
 
@@ -369,6 +396,16 @@ void Replicator::applyTreatments(GameWorld* gw, Inbound& in) {
             "[med] TREAT RECV id=%u hand=%u,%u applied=%d",
             p.treatId, k.i, k.s, n);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        // Protocol 57: the flesh gain the healer's local first aid already
+        // produced, applied raise-only so the owner's real body catches up
+        // immediately instead of lagging behind on its own passive regen.
+        int nf = engine::applyFleshParts(c, p.partFlesh);
+        if (nf > 0) {
+            char fb[160]; _snprintf(fb, sizeof(fb) - 1,
+                "[med] TREAT FLESH RECV id=%u hand=%u,%u applied=%d",
+                p.treatId, k.i, k.s, nf);
+            fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
+        }
     }
 }
 

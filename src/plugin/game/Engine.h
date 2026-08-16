@@ -1558,6 +1558,11 @@ bool sneakSubject(GameWorld* gw, const unsigned int subjHand[5], bool on);
 // skip. Returns the number of parts raised.
 int applyBandageParts(Character* c, const float band[12]);
 
+// Protocol 57: the applyBandageParts twin for FLESH - raise-only, keyed by the
+// same ANATOMY index. flesh[i] = level for anatomy part i, -1 = skip. Returns
+// the number of parts raised.
+int applyFleshParts(Character* c, const float flesh[12]);
+
 // Limb-loss replication (Phase C/D): reconcile a driven copy's LimbStates with
 // the owner's. states[] is LimbState per RobotLimbs::Limb (0xFF = skip); sid[]
 // the robotic replacement template stringIDs ("" = none). ORIGINAL->STUMP/
