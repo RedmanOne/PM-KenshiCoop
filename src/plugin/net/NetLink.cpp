@@ -415,6 +415,38 @@ void NetLink::threadLoop() {
     unsigned int  syncSamples   = 0;
     const long    HALF_DAY_MS   = 12l * 3600l * 1000l;
 
+    // ---- Transmit deadline (2026-08-17 stutter pass) --------------------------
+    // The send half at the bottom of this loop used to be reachable only after
+    // `while (enet_host_service(host, &ev, TICK_MS) > 0)` FELL THROUGH - and
+    // that loop only falls through when the timeout expires with no event, i.e.
+    // after TICK_MS of inbound SILENCE. So the 20 Hz motion stream was not sent
+    // every 50 ms; it was sent 50 ms after the peer's last packet. With both
+    // sides running this loop the two couple: each transmits one silence window
+    // after the other's burst drains, so the real period is
+    // 50 ms + the peer's burst + drain, it moves with traffic, and it stretches
+    // on every 1 Hz census / inventory / medical burst. Under sustained inbound
+    // (a save transfer queues ~32 chunks per 50 ms) the entity stream could be
+    // starved outright.
+    //
+    // The receiver pays for that: EntityInterp indexes its ring on the SENDER's
+    // stamp, so an irregular transmit cadence IS the snapshot spacing it sees.
+    // Measured on the 2026-08-17 session (both clients on ONE machine, where
+    // real path jitter is ~0): jit=44-212 ms, adaptive render delay swinging
+    // 185-826 ms, and extrap 9438 vs lerp 67007 - 12% of samples dead-reckoned
+    // rather than interpolated, which is the visible per-tick hitch.
+    //
+    // Fix: service against a DEADLINE instead of a per-call timeout. Events are
+    // drained with whatever time is left before the next transmit, and the send
+    // half runs on a fixed TICK_MS clock no matter how much traffic arrives.
+    u32 nextTxMs = monoMs() + TICK_MS;
+    // Cadence telemetry, ~5 s, so the fix is verifiable from a session log
+    // rather than by argument: n= transmits in the window, and the min/avg/max
+    // interval between them. Healthy = n~100, 50/50/50 over a 5 s window.
+    u32 txWinMs = monoMs();
+    u32 txPrevMs = 0;
+    unsigned int txN = 0;
+    u32 txMin = 0xFFFFFFFFu, txMax = 0, txSum = 0;
+
     while (!stopFlag_) {
         // Steam heartbeat: spike ping/echo + session-state change logging.
         // Cheap no-op when Steam isn't initialised (pure-UDP sessions).
@@ -441,8 +473,20 @@ void NetLink::threadLoop() {
             }
         }
 
+        // Drain inbound until the transmit deadline (see nextTxMs above). The
+        // per-call timeout is the time REMAINING before the send half is due,
+        // so a busy inbound stream delays events, never the outbound tick.
         ENetEvent ev;
-        while (enet_host_service(enetHost_, &ev, TICK_MS) > 0) {
+        for (;;) {
+            u32  svcNow = monoMs();
+            long budget = (long)(nextTxMs - svcNow);
+            if (budget <= 0) break;               // due now: go transmit
+            if (budget > TICK_MS) {               // clock jump / first pass
+                nextTxMs = svcNow + TICK_MS;
+                budget   = TICK_MS;
+            }
+            if (enet_host_service(enetHost_, &ev, (enet_uint32)budget) <= 0)
+                break;                            // idle through the deadline
             switch (ev.type) {
                 case ENET_EVENT_TYPE_CONNECT: {
                     // A fresh connection restarts the peer's epoch sequence (a
@@ -1004,6 +1048,35 @@ void NetLink::threadLoop() {
                 }
                 default:
                     break;
+            }
+        }
+
+        // Deadline reached (or the drain ran past it): schedule the next one.
+        // Advancing by TICK_MS keeps the tick phase stable across a slow pass;
+        // re-basing after a long stall (world load, save transfer, a scheduler
+        // hiccup) avoids a burst of catch-up transmits that would arrive as one
+        // clump - the exact spacing defect this whole change is about.
+        {
+            u32 txNow = monoMs();
+            if ((long)(txNow - nextTxMs) > TICK_MS) nextTxMs = txNow + TICK_MS;
+            else                                    nextTxMs += TICK_MS;
+            if (txPrevMs != 0) {
+                u32 gap = txNow - txPrevMs;
+                if (gap < txMin) txMin = gap;
+                if (gap > txMax) txMax = gap;
+                txSum += gap;
+                ++txN;
+            }
+            txPrevMs = txNow;
+            if ((txNow - txWinMs) >= 5000) {
+                char b[112];
+                // netLog already stamps the [net] tag; don't repeat it here.
+                _snprintf(b, sizeof(b) - 1, "tx n=%u min=%u avg=%u max=%u",
+                          txN, txN ? txMin : 0u, txN ? (txSum / txN) : 0u, txMax);
+                b[sizeof(b) - 1] = '\0';
+                netLog(b);
+                txWinMs = txNow; txN = 0; txSum = 0;
+                txMin = 0xFFFFFFFFu; txMax = 0;
             }
         }
 

@@ -20,7 +20,7 @@ float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 } // namespace
 
 InterpConfig::InterpConfig()
-    : minDelayMs(50), maxDelayMs(200), maxExtrapMs(250),
+    : minDelayMs(50), maxDelayMs(200), maxExtrapMs(250), maxExtrapCapMs(900),
       snapDistSq(50.0f * 50.0f), staleMs(2000),
       cadenceDelayK(2.0f), maxCadenceDelayMs(1200) {}
 
@@ -223,7 +223,23 @@ bool EntityInterp::sample(unsigned long nowMs, const InterpConfig& cfg, EntitySt
     if (renderTime >= newest.t) {
         const Snap& prev = at(count_ - 2);
         unsigned long ahead = renderTime - newest.t;
-        if (ahead > cfg.maxExtrapMs) ahead = cfg.maxExtrapMs;
+        // The dead-reckoning budget has to cover the stream's OWN cadence, or a
+        // sparsely-sampled body glides for maxExtrapMs and then stands still for
+        // the rest of the interval - which is precisely how a 2 Hz body renders
+        // as "jump, wait, jump" (user report 2026-08-17: "they teleport each sync
+        // step instead of moving... doesn't move between teleports, just
+        // remaining at place waiting till next teleport"). The flat 250 ms was
+        // sized for the 20 Hz near band, where it is one lost batch of cover; on
+        // a 500 ms segment it covers half the gap and freezes the other half.
+        // Allow one and a half of the newest segment instead, so the body keeps
+        // moving right up to the sample that supersedes it, still bounded so a
+        // genuinely abandoned stream cannot fly off along a stale velocity.
+        unsigned long budget = cfg.maxExtrapMs;
+        unsigned long segMs  = newest.t - prev.t;
+        unsigned long segCap = segMs + segMs / 2;
+        if (segCap > budget) budget = segCap;
+        if (budget > cfg.maxExtrapCapMs) budget = cfg.maxExtrapCapMs;
+        if (ahead > budget) ahead = budget;
         float seg = (float)(newest.t - prev.t);
         lastMode_ = SM_EXTRAP;
         float sdx = newest.x - prev.x, sdy = newest.y - prev.y, sdz = newest.z - prev.z;

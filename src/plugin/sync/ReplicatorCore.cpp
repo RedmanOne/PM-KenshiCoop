@@ -30,6 +30,8 @@ Replicator::Replicator()
       onZeroEarly_(0), onZeroMid_(0), onZeroSteady_(0),
       interpLerp_(0), interpSingle_(0), interpClampOld_(0),
       interpExtrap_(0), interpSegSnap_(0),
+      interpNearN_(0), interpNearStarve_(0),
+      interpMidN_(0), interpMidStarve_(0), interpNearMaxSeg_(0),
       hardSnapSquad_(0), hardSnapNpc_(0), hardSnapMid_(0),
       walkReissueSquad_(0), walkReissueNpc_(0), restFlipNpc_(0), restFlipMid_(0),
       combatSnapTotal_(0), combatSoftWalk_(0), combatSlide_(0), combatOrder_(0),
@@ -52,6 +54,8 @@ Replicator::Replicator()
       stealthSync_(true), proneSync_(true),
       gateAuthority_(false), trustLogTick_(0),
       trustGrants_(0), trustRevokes_(0),
+      npcKinematic_(true), kinPlaced_(0), kinPosed_(0),
+      kinAbsorbed_(0), smoothGlide_(0), smoothHardPlace_(0), smoothDead_(0),
       authSuppresses_(0), authRestores_(0), authReassertMs_(0), authPruned_(0),
       censusRadius_(0.0f), censusSendMs_(0), censusRecvMs_(0), censusCulls_(0),
       censusOffCell_(0), cellYields_(0), localId_(0xFFFFFFFFu), hostDriveRefusals_(0),
@@ -59,6 +63,10 @@ Replicator::Replicator()
       censusStaleMs_(0), censusStaleEdges_(0), proxyDriftLogMs_(0),
       camHintSendMs_(0), peerCamMs_(0),
       midCursor_(0), midSliceMs_(0), midFastPromoted_(0),
+      ladderStream_(true),
+      pubLogMs_(0), pubGapN_(0), pubWorstGap_(0), pubWorstDist_(0.0f),
+      pubNearN_(0), pubLadderN_(0), pubDueN_(0), pubCapHits_(0),
+      midUnwatched_(0),
       censusParkDist_(0.0f), censusParks_(0),
       censusPrevMs_(0), censusWalkDist_(0.0f), censusWalks_(0),
       censusFreezeAi_(true),
@@ -96,6 +104,8 @@ Replicator::Replicator()
       platoonT0_(0),
       lifeSweepMs_(0) {
     peerCam_[0] = peerCam_[1] = peerCam_[2] = 0.0f;
+    pubWorstKey_.t = pubWorstKey_.c = pubWorstKey_.cs = 0;
+    pubWorstKey_.i = pubWorstKey_.s = 0;
 }
 
 // ---- Phase 3: unified entity lifecycle ---------------------------------------
@@ -191,6 +201,10 @@ void Replicator::resetSession() {
     suppressed_.clear();
     midBand_.clear();          // host mid-band round-robin (rebuilt by next census)
     midCursor_ = 0; midSliceMs_ = 0;
+    // Publish cadence state describes the OLD world's hands and geometry.
+    pubStamp_.clear();
+    pubLogMs_ = 0; pubGapN_ = 0; pubWorstGap_ = 0; pubWorstDist_ = 0.0f;
+    pubNearN_ = pubLadderN_ = pubDueN_ = pubCapHits_ = 0;
     life_.clear();             // Phase 3 lifecycle: the OLD world's journeys
     lifeSweepMs_ = 0;
     // Debug markers hold raw Character* from the OLD world plus GUI label

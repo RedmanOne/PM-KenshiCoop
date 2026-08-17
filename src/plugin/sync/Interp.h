@@ -22,7 +22,12 @@ namespace coop {
 struct InterpConfig {
     unsigned long minDelayMs;  // floor on render delay (low-jitter LAN)
     unsigned long maxDelayMs;  // ceiling on render delay for a DENSE stream
-    unsigned long maxExtrapMs; // dead-reckoning cap when the buffer is starved
+    unsigned long maxExtrapMs; // dead-reckoning FLOOR when the buffer is starved
+                               // (sized for the 20 Hz near band; sample() raises
+                               // it to 1.5 newest-segments for a sparse stream so
+                               // the body glides through the gap instead of
+                               // freezing partway across it)
+    unsigned long maxExtrapCapMs; // ...and the hard bound on that scaling
     float         snapDistSq;  // source step^2 above which we snap (teleport)
     unsigned long staleMs;     // stop driving if newest snapshot is older than this
     // maxDelayMs is sized for the 20 Hz near band. A body on the round-robin

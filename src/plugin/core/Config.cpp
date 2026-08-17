@@ -135,6 +135,20 @@ void loadConfig(Config& c) {
     // retry-passed). "0" is the escape hatch.
     c.gateAuthority = envOr("KENSHICOOP_GATE_AUTHORITY", "1") != "0";
 
+    // Kinematic world-NPC drive, DEFAULT ON (2026-08-17 stutter pass). The walk
+    // drive it replaces was measured over one 282 s manual session issuing 36
+    // walk re-issues/s and 5.5 walk<->rest flips/s across ~15 bodies, leaving an
+    // ordinary NPC walking at 15 u/s some 96 u behind its host copy before a
+    // teleport reconciled it. "0" is the escape hatch back to that path.
+    c.npcKinematic = envOr("KENSHICOOP_NPC_KINEMATIC", "1") != "0";
+
+    // Distance-graded send ladder, DEFAULT ON (2026-08-17 stutter pass). The
+    // round-robin it replaces gave one ~2 Hz cadence to every body past the
+    // stream bubble, skipped stationary ones, and streamed nothing at all past
+    // the 48-entry mid list - which is why the 1 Hz census park was still
+    // teleporting bodies onto each other at 463-2428 u of divergence.
+    c.ladderStream = envOr("KENSHICOOP_LADDER_STREAM", "1") != "0";
+
     // Inventory sync (Phase 4a). Env semantics: "1" = force on, "0" = force off
     // (escape hatch), unset = ON for REAL sessions (scenario == "" - the 2026-07-07
     // remote session played with it off and equipment changes never crossed) and the
@@ -467,6 +481,8 @@ std::string describeConfig(const Config& c) {
         { "store",   c.storeSync },    { "squad",   c.squadSync },
         { "latejoin",c.latejoinSync }, { "aiSuspend", c.aiSuspend },
         { "gateAuth",c.gateAuthority },{ "camInterest", c.camInterest },
+        { "npcKinematic", c.npcKinematic },
+        { "ladderStream", c.ladderStream },
         { "censusFreezeAi", c.censusFreezeAi },
         { "debugMarkers", c.debugMarkers },
     };
