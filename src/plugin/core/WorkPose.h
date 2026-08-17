@@ -38,6 +38,14 @@
 //     ordered). The caller passes such a task as "identity-trusted" (the boolean arg
 //     below), so the same ungated accept path applies.
 //
+//   * DOOR-LOCK subjects (2026-08-17 lockpick sync) are the DOOR the body is picking
+//     or keying. A door is a Building (DoorStuff) straight out of the shared save, so
+//     it has the work fixture's property in full - unique, no interchangeable twin to
+//     mis-resolve to, no runtime identity to translate - and it is identity-trusted
+//     for the same reason. The distance that makes this matter is a town GATE: like a
+//     large mine, the origin we resolve can sit well away from the spot the lock is
+//     actually worked from, so the seat radius would reject the correct gate.
+//
 // Shared by:
 //   * EngineSpawnCombat.cpp - the applyTask / applyTaskOrder acceptance gate
 //   * prototest             - the no-game unit layer that guards the mining fix

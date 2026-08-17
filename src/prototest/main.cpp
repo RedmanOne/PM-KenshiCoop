@@ -1231,6 +1231,15 @@ static void testWorkPoseMatch() {
     CHECK("medic 12 m accepted (identity-trusted)",  poseFixtureAccepted(true,  12.0f));
     CHECK("medic 12 m rejected as seat",            !poseFixtureAccepted(false, 12.0f));
 
+    // Lockpick sync (2026-08-17): a door-lock subject is the DOOR, a unique
+    // SAVE-BAKED building - the work-fixture argument, so it is identity-trusted
+    // too. The distance that forces this is a town GATE, whose origin can sit well
+    // away from the spot its lock is worked from; gating that on the seat radius
+    // would reject the correct gate and park the picker with no animation, which is
+    // the mining bug in a different costume.
+    CHECK("gate 20 m accepted (identity-trusted)",  poseFixtureAccepted(true,  20.0f));
+    CHECK("gate 20 m rejected as seat",            !poseFixtureAccepted(false, 20.0f));
+
     // Seat still tight: a fixture right under the body is accepted, a far stool not.
     CHECK("seat 3 m accepted",   poseFixtureAccepted(false, 3.0f));
     CHECK("seat 6 m boundary",   poseFixtureAccepted(false, 6.0f));

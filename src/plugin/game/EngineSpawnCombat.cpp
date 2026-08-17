@@ -1637,9 +1637,13 @@ int applyTask(Character* c, const EntityState& e) {
             float dx = sp.x - e.x, dz = sp.z - e.z;
             // Seats: reject a far (mis-resolved) prop. Work fixtures + medic (patient)
             // subjects: trusted by identity - a large mine's origin sits far from its
-            // operate spot, and a patient's driven copy may be mid-motion.
+            // operate spot, and a patient's driven copy may be mid-motion. A DOOR is
+            // identity-trusted for the work-fixture reason (see isDoorLockTask): it is
+            // a unique save-baked building, so a resolved door IS the right door, and
+            // a town GATE's origin can sit well away from the spot its lock is worked
+            // from - the large-mine geometry, which no fixed radius covers.
             bool identityTrusted = isWorkFixtureTask((int)e.task) || isMedicTask((int)e.task) ||
-                                   isAssassinateTask((int)e.task);
+                                   isAssassinateTask((int)e.task) || isDoorLockTask((int)e.task);
             if (!coop::poseFixtureAcceptedSq(identityTrusted, dx * dx + dz * dz))
                 return 3; // fixture resolved but it's the WRONG (far) one -> park
         }
@@ -1711,25 +1715,34 @@ int applyTaskOrder(Character* c, const EntityState& e) {
         // victim), not a building - both order with dest=NULL and are trusted by
         // identity rather than distance-gated.
         bool charSubject = isMedicTask((int)e.task) || isAssassinateTask((int)e.task);
+        // A DOOR is a Building, but not an interior one: passing it as
+        // addOrder's `destinationIndoors` asks the body to path INSIDE the door.
+        // It shares the dest=NULL form with the character subjects above, and the
+        // identity trust of a work fixture (unique, save-baked, and a gate's
+        // origin can sit far from where its lock is worked from).
+        bool doorSubject = isDoorLockTask((int)e.task);
         {
             float dx = loc.x - e.x, dz = loc.z - e.z;
             // Seats: reject a far (mis-resolved) prop. Work fixtures + character
-            // (patient/victim) subjects: trusted by identity - a large mine's
-            // origin sits far from its operate spot, and a driven patient/victim
-            // copy may be mid-motion.
-            if (!coop::poseFixtureAcceptedSq(isWorkFixtureTask((int)e.task) || charSubject,
+            // (patient/victim) + door subjects: trusted by identity - a large
+            // mine's origin sits far from its operate spot, and a driven
+            // patient/victim copy may be mid-motion.
+            if (!coop::poseFixtureAcceptedSq(isWorkFixtureTask((int)e.task) || charSubject ||
+                                                 doorSubject,
                                              dx * dx + dz * dz))
                 return 3; // resolved the WRONG (far) fixture -> caller parks in place
         }
         if (g_clearGoalsFn) g_clearGoalsFn(c);
         // Player-order to the EXACT fixture + location. A seat/machine IS a Building,
         // so it doubles as the order destination. A medic or assassinate subject is
-        // a CHARACTER (patient or victim), not a building, so order it with
-        // dest=NULL - the same form a player's right-click First Aid / sneak-attack
-        // issues (mirrors orderMeleeAttackViaOrder).
+        // a CHARACTER (patient or victim), and a door-lock subject is a door - none
+        // of them is an interior destination, so order those with dest=NULL - the
+        // same form a player's right-click First Aid / sneak-attack / unlock issues
+        // (mirrors orderMeleeAttackViaOrder).
         // clear=true drops prior orders.
         if (g_addOrderFn) {
-            Building* dest = charSubject ? 0 : reinterpret_cast<Building*>(target);
+            Building* dest = (charSubject || doorSubject)
+                                 ? 0 : reinterpret_cast<Building*>(target);
             g_addOrderFn(c, dest, (int)e.task, target, /*shift*/false,
                          /*clear*/true, &loc);
         } else if (g_addJobFn) {

@@ -53,11 +53,13 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
                     raw[i].hType, raw[i].hContainer, raw[i].hContainerSerial);
                 if (!tc) continue;
                 bool assassinate = engine::isAssassinateTask((int)raw[i].rawTask);
+                bool lockpick    = engine::isDoorLockTask((int)raw[i].rawTask);
                 char tag[24];
                 _snprintf(tag, sizeof(tag) - 1, "%s T%u",
-                          assassinate ? "ASSASSINATE" : "TASK", (unsigned)raw[i].rawTask);
+                          assassinate ? "ASSASSINATE" : (lockpick ? "LOCKPICK" : "TASK"),
+                          (unsigned)raw[i].rawTask);
                 tag[sizeof(tag) - 1] = '\0';
-                debugMark(tc, assassinate ? 0 : 3, tag);
+                debugMark(tc, (assassinate || lockpick) ? 0 : 3, tag);
                 // Log too (once per key, via the existing logTaskKeyOnce machinery
                 // already firing unconditionally in captureOne) so this is
                 // verifiable from the log file even if the GUI marker never
@@ -133,6 +135,35 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         if (!owned) continue;
         buf[n++] = raw[i];
         ownHands_.insert(hk);
+    }
+    // DIAGNOSTIC (2026-08-17, lockpick sync): log the EDGES of every door-lock
+    // episode an OWNED character starts and finishes - unconditionally, because a
+    // player watches this one happen (pitfall 9), and over the owned subset rather
+    // than the whole roster so a `CAPTURE` line only ever appears on the machine
+    // that authored the pick (the peer's copy reports the same task once the pose
+    // lands, and logging that here would read as a second author).
+    // Both numbers are on the line: `raw` is what the engine reports for the body,
+    // `task` is what we actually stream. raw=<a door task> with task=65535 means
+    // the capture allowlist did not fire; both set means the send side is doing its
+    // job and a missing animation is on the receiver (look for the matching
+    // `[lockpick] APPLY` in the OTHER client's log). Edge-triggered off a set of the
+    // hands currently working a lock, so one pick costs two lines, not one a tick.
+    {
+        static std::set<unsigned int> picking; // hand mix -> episode in progress
+        for (unsigned int i = 0; i < n; ++i) {
+            bool doorTask = buf[i].rawTask != TASK_NONE &&
+                            engine::isDoorLockTask((int)buf[i].rawTask);
+            unsigned int pk = buf[i].hIndex * 100003u + buf[i].hSerial;
+            bool wasPicking = picking.find(pk) != picking.end();
+            if (doorTask == wasPicking) continue; // no edge
+            if (doorTask) picking.insert(pk); else picking.erase(pk);
+            char b[176]; _snprintf(b, sizeof(b) - 1,
+                "[lockpick] CAPTURE %s hand=%u,%u raw=%u task=%u door=%u,%u",
+                doorTask ? "begin" : "end", buf[i].hIndex, buf[i].hSerial,
+                (unsigned)buf[i].rawTask, (unsigned)buf[i].task,
+                buf[i].sIndex, buf[i].sSerial);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
     }
     // Jail put-to-work desync spike (KENSHICOOP_JAIL_PROBE, read-only): the
     // OWNED view of any captive body (the join's real, authoritative PC while it

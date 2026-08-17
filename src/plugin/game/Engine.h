@@ -1226,6 +1226,18 @@ bool isBuildSiteTask(int taskKey);
 // kenshi/Enums.h.
 bool isAssassinateTask(int taskKey);
 
+// True if 'taskKey' is DOOR LOCK work - lockpicking (PICK_LOCK) or turning a key
+// (UNLOCK_DOOR / LOCK_DOOR and their _HERE / _PLAYER_ORDER forms) - the 2026-08-17
+// lockpick sync. The subject is the DOOR: a Building (DoorStuff) whose hand comes
+// out of the shared save, so unlike a seat there is no interchangeable prop to
+// mis-resolve to, and unlike a mine there is no runtime identity to translate.
+// Three consumers need it and none of them may include kenshi/Enums.h:
+//   * applyTask / applyTaskOrder - identity-trust the fixture (see below) and
+//     order it with dest=NULL (a door is not an interior destination).
+//   * the drive's rest/walk fork - a picking body is anchored, not walking.
+//   * the sync layer's diagnostics - classify a streamed task for the log.
+bool isDoorLockTask(int taskKey);
+
 // AI-gating probe lever: recruit a world NPC into the local player's squad (the
 // "inhabit" path) so it stops self-assigning town tasks and obeys our drive.
 // Join-side only. Returns the engine's recruit() result (false if unresolved).

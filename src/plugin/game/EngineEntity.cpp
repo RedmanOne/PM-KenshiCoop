@@ -48,6 +48,40 @@ bool isBuildSiteTaskImpl(int t) {
     }
 }
 
+// Door LOCK actions (2026-08-17 lockpick sync): a body standing AT a door working
+// its lock - picking it, or turning a key on it. The fixture is the DOOR, which is
+// a Building (DoorStuff derives from it) with a SAVE-BAKED hand, so it resolves
+// cross-client with no translation, exactly like a seat or a bed.
+//
+// Both halves of the family are here because the top-level Tasker we capture
+// (CharBody::currentAction) may report either the executing leaf (PICK_LOCK) or the
+// player-order goal that spawned it (UNLOCK_DOOR_PLAYER_ORDER), and which one a
+// given order produces is not worth guessing at - carrying all of them costs
+// nothing and cannot mis-pose a body, since every one of them poses at the same
+// door object.
+//
+// Deliberately EXCLUDED:
+//   * OPEN_DOOR / CLOSE_DOOR (and their _HERE forms) - a swing is instantaneous
+//     and the door's own (open, locked) state already replicates on protocol 26,
+//     so reproducing them adds order churn and no visible animation.
+//   * BASH_DOOR - the bash DAMAGES the door, and door health has no channel; two
+//     engines bashing independently would break the door on one client only. The
+//     lock, by contrast, is an idempotent latch both sides drive to the same value
+//     (see the two-writers note in the sync layer).
+bool isDoorLockTaskImpl(int t) {
+    switch (t) {
+        case PICK_LOCK:                // the lockpicking animation itself
+        case UNLOCK_DOOR:              // key/latch unlock at a remote door
+        case UNLOCK_DOOR_HERE:         // ... at the door the body is standing in
+        case UNLOCK_DOOR_PLAYER_ORDER: // the right-click "unlock this" order
+        case LOCK_DOOR:
+        case LOCK_DOOR_HERE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Anchored rest poses worth reproducing: the body stays put AT a fixture (a stool,
 // throne, bed, machine), so committing the same task on the join seats/poses it in
 // place. We deliberately EXCLUDE movement tasks (WANDER_TOWN, GO_TO_THE_BAR...) and
@@ -96,7 +130,15 @@ bool isReproduciblePose(int t) {
         case STEALTH_KILL:
             return true;
         default:
-            return isBuildSiteTaskImpl(t);
+            // Door lock work (2026-08-17 lockpick sync). Reported as "lockpicking
+            // is not synced at all", and the path explains it: without this branch
+            // a pick streamed TASK_NONE, so the peer's copy took the rest path with
+            // no pose to reproduce, idle-parked at the door for the whole pick, and
+            // the only thing that ever crossed was the protocol-26 row that popped
+            // the door unlocked at the end. The pick is a stationary anchored pose
+            // at a save-baked fixture, so it reproduces on that same rest path once
+            // the task is actually carried.
+            return isBuildSiteTaskImpl(t) || isDoorLockTaskImpl(t);
     }
 }
 
@@ -567,6 +609,8 @@ int readTaskKey(Character* c) {
 bool isNodeAnchoredPose(int taskKey) { return isNodeAnchoredPoseImpl(taskKey); }
 
 bool isBuildSiteTask(int taskKey) { return isBuildSiteTaskImpl(taskKey); }
+
+bool isDoorLockTask(int taskKey) { return isDoorLockTaskImpl(taskKey); }
 
 bool recruitNpc(GameWorld* gw, Character* c) {
     if (!gw || !c || !g_recruitFn) return false;

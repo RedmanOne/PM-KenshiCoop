@@ -346,6 +346,19 @@ void Replicator::applyTargets(GameWorld* gw) {
         // 2026-07-17, ~4/5 tries; the 1/5 that worked caught cMoving==0). A
         // bedded body is never walking: anchor it so the rest/pose path runs.
         if (engine::taskIsBedPose((int)out.task)) hostMoving = false;
+        // Door lock work (2026-08-17 lockpick sync) is the same shape of anchored
+        // action: the body stands at the door and works the lock, and if its
+        // currentlyMoving flag is set by the pick clip the way the bed clip sets it
+        // above, hostMoving routes it down the walk/snap path and applyRest - the
+        // only thing that reproduces the pose - never runs. Unlike a bed, though, a
+        // picker DOES walk: the order is issued (and so the task is captured) while
+        // the body is still crossing the street to the door, and anchoring it there
+        // would hand the walk to the peer's own local pathing instead of the
+        // streamed transform. So distrust only the FLAG, and keep the speed: this is
+        // a no-op whenever cMoving is honest, and it is what lets a picker that is
+        // genuinely standing still be posed.
+        if (engine::isDoorLockTask((int)out.task) && out.cSpeed <= MOVE_EPS)
+            hostMoving = false;
 
         // Two drive regimes (see Engine::isLocalPlayerChar):
         //   * SQUAD member - a player-controlled body, inert when uncontrolled, so
@@ -2402,6 +2415,33 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
             // reach this branch - the movement-independent block above catches
             // them before the walk/rest fork, since applyRest only runs once a
             // body is classified at rest and an approaching attacker never is.
+            //
+            // Door lock work (2026-08-17 lockpick sync) DOES belong here: unlike a
+            // takedown it is a long STATIONARY action at a fixture, so it reaches
+            // the rest path the same way sitting and mining do. Logged under its
+            // own tag (unconditionally - a player watches this happen) because the
+            // failure modes are worth telling apart at a glance: r=1 means the door
+            // did not resolve here, which is the known limit for a door on a
+            // session-PLACED building (its runtime hand only exists on the placer;
+            // baked doors come out of the shared save and resolve fine).
+            //
+            // On the RESULT: the peer's copy runs the engine's own pick, so the lock
+            // has two authors. That is safe here in a way pitfall 16's wallet is not
+            // - a lock is an idempotent latch and both authors drive it to the SAME
+            // value (unlocked), so the two sides converge instead of erasing each
+            // other; protocol 26 then carries whichever engine got there first to
+            // the other. The cost is only that a contested lock opens on the earlier
+            // of two rolls.
+            if (engine::isDoorLockTask((int)out.task)) {
+                char b[192]; _snprintf(b, sizeof(b) - 1,
+                    "[lockpick] APPLY hand=%u,%u door=%u,%u task=%u r=%d try=%u",
+                    out.hIndex, out.hSerial, posed->sIndex, posed->sSerial,
+                    (unsigned)out.task, r, d.taskRetries);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                char tag[24]; _snprintf(tag, sizeof(tag) - 1, "LOCKPICK-RX r%d", r);
+                tag[sizeof(tag) - 1] = '\0';
+                debugMark(c, r == 2 ? 0 : 1, tag);
+            }
             if (r == 2) { d.taskApplied = true; d.taskRetries = 0; } // posed at the fixture
             else if (r == 1) d.taskBad = true; // fixture not loaded here -> park
             else if (r == 3) {
