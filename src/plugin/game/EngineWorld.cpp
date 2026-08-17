@@ -1517,6 +1517,27 @@ static bool isContainerClassType(int t) {
     return t == (int)BCTYPE_STORAGE || isMachineClassType(t);
 }
 
+// The class filter above describes the PLAYER's storage, not the WORLD's. Every
+// lootable container a town actually contains is BCTYPE_USABLE (UseableStuff),
+// not BCTYPE_STORAGE - measured 2026-08-17 in one shop, where 'Wooden Barrel',
+// 'Small Barrel', 'Large Basket', 'Safe', 'Shop Counter' and the 'Secure Wooden
+// Chest' the reported desync was tested on ALL logged cls=2, while the only
+// cls=3 rows anywhere nearby were a Weapon Cabinet and a Rum Barrel. So a world
+// chest was never censused, never authored and never described by any snapshot:
+// one player took an item out and the other kept seeing it, in both directions,
+// with nothing in the log to say why.
+//
+// The INVENTORY is what makes a useable a container, and it is also what keeps
+// the rest of that class out: beds, chairs, tables, lights and the other
+// UseableStuff furniture have none, so they neither enter the census nor get
+// announced as protocol-55 fixtures. Caller holds the SEH frame.
+static bool isContainerBuilding(RootObject* o, Building* b) {
+    int t = (int)b->classType;
+    if (isContainerClassType(t)) return true;
+    if (t != (int)BCTYPE_USABLE) return false;
+    return o->getInventory() != 0;
+}
+
 // Fill a ContRead from a live container-bearing Building. Callers hold the
 // SEH frame and have already verified isContainerClassType(b->classType).
 // The contents summary reads up to 64 entries (readInvItems carries its own
@@ -1556,6 +1577,64 @@ static void fillContRead(Building* b, ContRead* r) {
     }
 }
 
+// Diagnostic for the census's blind spot: a building the container filter
+// rejected that nevertheless holds items. The filter is deliberately narrow
+// (STORAGE + the machine classes), so anything else with a stocked inventory is
+// a container players can loot that no channel describes - report it once per
+// object and leave the behaviour alone. Caller holds the SEH frame.
+static void noteUncensusedContainer(RootObject* o, Building* b) {
+    // Bounded first-sight set (index,serial). Main thread only; a few dozen
+    // entries per town, and the cap keeps a long session from growing it.
+    static std::set<std::pair<unsigned int, unsigned int> > s_noted;
+    Inventory* inv = o->getInventory();
+    if (!inv) return;                       // no inventory = nothing to lose
+    InvItemEntry ent[8];
+    unsigned int ni = readInvItems(inv, ent, 0, 8);
+    if (ni == 0) return;                    // empty = nothing to desync
+    unsigned int h[5];
+    if (!readObjectHand(o, h)) return;
+    if (s_noted.size() >= 256) return;
+    if (!s_noted.insert(std::make_pair(h[3], h[4])).second) return;
+    GameData* gd = o->getGameData();
+    Ogre::Vector3 p = o->getPosition();
+    char nb[256];
+    _snprintf(nb, sizeof(nb) - 1,
+              "[store] census SKIPPED hand=%u,%u,%u,%u,%u cls=%d complete=%d "
+              "items=%u pos=%.0f,%.0f name='%s' (holds items, not a censused class)",
+              h[0], h[1], h[2], h[3], h[4], (int)b->classType,
+              b->_buildState.isComplete ? 1 : 0, ni, p.x, p.z,
+              gd ? gd->name.c_str() : "");
+    nb[sizeof(nb) - 1] = '\0'; coop::logLine(nb);
+}
+
+// Horizontal squared distance from a world point to the closest interest
+// center. The census ranks candidates by this so a full row budget keeps the
+// containers nearest the players. Horizontal only, matching every other
+// fixture match in the plugin (a building's origin Y varies with terrain fit).
+static float nearestCenterD2(const Ogre::Vector3* centers, unsigned int nc,
+                             float x, float z) {
+    float best = 1e18f;
+    for (unsigned int i = 0; i < nc; ++i) {
+        float dx = centers[i].x - x, dz = centers[i].z - z;
+        float d2 = dx * dx + dz * dz;
+        if (d2 < best) best = d2;
+    }
+    return best;
+}
+
+// Spatial-query budget for the container census. This is a cap on the objects
+// the engine hands back, NOT on the ones we keep - and EVERY building is an
+// itemType BUILDING: walls, doors, lights, roofs, fluff. The old 256 was
+// comfortable around a lone base but not in a TOWN, where a 100 u sphere holds
+// far more than 256 of them, so the query returned a truncated slice that a
+// world storage chest could easily fall outside of - the reported "the host
+// takes an item out of a town chest and the client still sees it there" (the
+// chest is simply never censused, so it is never authored, so no snapshot ever
+// describes it). Raising the budget costs one 1 Hz array walk over objects the
+// class filter below discards immediately; it does not widen what we PUBLISH,
+// which is still bounded by maxOut and the hasInv filter.
+static const int CONT_QUERY_MAX = 1024;
+
 unsigned int enumContainersNear(GameWorld* gw, float radius, ContRead* out,
                                 unsigned int maxOut) {
     if (!gw || !out || maxOut == 0 || !g_getObjsFn) return 0;
@@ -1566,15 +1645,44 @@ unsigned int enumContainersNear(GameWorld* gw, float radius, ContRead* out,
         if (nc == 0) return 0;
         for (unsigned int ci = 0; ci < nc; ++ci) {
             g_npcQuery.clear();
-            g_getObjsFn(gw, &g_npcQuery, &centers[ci], radius, BUILDING, 256, 0);
+            g_getObjsFn(gw, &g_npcQuery, &centers[ci], radius, BUILDING,
+                        CONT_QUERY_MAX, 0);
             unsigned int total = g_npcQuery.size();
-            for (unsigned int i = 0; i < total && n < maxOut; ++i) {
+            // A query that came back FULL was truncated by the budget, so the
+            // census it feeds is a slice of the neighbourhood rather than all of
+            // it: a container missing from the sync is expected here, and this
+            // line is what tells the two apart. Throttled - a party standing in
+            // a dense town would otherwise print it every second.
+            if (total >= (unsigned int)CONT_QUERY_MAX) {
+                static unsigned long lastFullMs = 0;
+                unsigned long fullNow = GetTickCount();
+                if (lastFullMs == 0 || (fullNow - lastFullMs) >= 30000) {
+                    lastFullMs = fullNow;
+                    char fb[144];
+                    _snprintf(fb, sizeof(fb) - 1,
+                              "[store] census query FULL n=%u cap=%d r=%.0f "
+                              "(neighbourhood truncated - containers may be missed)",
+                              total, CONT_QUERY_MAX, radius);
+                    fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
+                }
+            }
+            for (unsigned int i = 0; i < total; ++i) {
                 RootObject* o = g_npcQuery[i];
                 if (!o) continue;
                 Building* b = static_cast<Building*>(o);
-                if (!isContainerClassType((int)b->classType)) continue;
-                // Incomplete sites ride protocol 27 until finished.
-                if (!b->_buildState.isComplete) continue;
+                if (!isContainerBuilding(o, b) ||
+                    !b->_buildState.isComplete) {
+                    // Rejected by the class filter or still a construction site.
+                    // Both are correct by design, but they are also the two ways
+                    // a lootable world container can be invisible to the sync
+                    // WITHOUT leaving any other trace: nothing downstream ever
+                    // hears about this building again. Name the ones that hold
+                    // actual items, once each, so a world chest that never syncs
+                    // can be attributed to its class rather than guessed at.
+                    // Read-only, first-sight, and bounded - never a filter change.
+                    noteUncensusedContainer(o, b);
+                    continue;
+                }
                 unsigned int h[5];
                 if (!readObjectHand(o, h)) continue;
                 bool dup = false; // the two interest spheres can overlap
@@ -1582,8 +1690,28 @@ unsigned int enumContainersNear(GameWorld* gw, float radius, ContRead* out,
                     if (out[k].hand[3] == h[3] && out[k].hand[4] == h[4] &&
                         out[k].hand[1] == h[1]) { dup = true; break; }
                 if (dup) continue;
-                fillContRead(b, &out[n]);
-                ++n;
+                // NEAREST WINS once the row budget is full. The rows used to be
+                // whatever the spatial query happened to list first, so in a town
+                // - where the container classes alone can exceed maxOut - the
+                // chest a player is standing at could lose its slot to a shelf
+                // two houses away and never be authored at all. Distance to the
+                // closest interest center is the right tiebreak: the containers
+                // players actually use are the ones they are standing next to.
+                Ogre::Vector3 p = o->getPosition();
+                float d2 = nearestCenterD2(centers, nc, p.x, p.z);
+                unsigned int slot = n;
+                if (n >= maxOut) {
+                    float worst = -1.0f;
+                    unsigned int worstK = 0;
+                    for (unsigned int k = 0; k < n; ++k) {
+                        float kd2 = nearestCenterD2(centers, nc, out[k].x, out[k].z);
+                        if (kd2 > worst) { worst = kd2; worstK = k; }
+                    }
+                    if (d2 >= worst) continue; // nothing kept is farther - drop it
+                    slot = worstK;
+                }
+                fillContRead(b, &out[slot]);
+                if (slot == n) ++n;
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { return n; }
@@ -1596,7 +1724,9 @@ bool readContainerByHand(const unsigned int cHand[5], ContRead* out) {
     if (!ro) return false;
     __try {
         Building* b = static_cast<Building*>(ro);
-        if (!isContainerClassType((int)b->classType)) return false;
+        // Same widened test the census uses, so a world container reads back
+        // through the identity path (protocol 55) the same way it enumerates.
+        if (!isContainerBuilding(ro, b)) return false;
         fillContRead(b, out);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }

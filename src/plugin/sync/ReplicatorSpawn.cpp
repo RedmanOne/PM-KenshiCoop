@@ -855,10 +855,40 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                                        ev.aIndex, ev.aSerial };
                 int kind = (int)ev.arg;
                 bool ok = occ && engine::applyFurniture(0, occ, fh, kind, true);
-                char fb[160]; _snprintf(fb, sizeof(fb) - 1,
-                    "[furn] RECV ENTER id=%u occ=%u,%u furn=%u,%u kind=%d ok=%d",
+                // Identity fallback for beds/cages. The furniture hand crosses
+                // RAW - protocol 55 announces containers and machines, never
+                // seats or beds, on the assumption that a bed is save-baked and
+                // therefore carries the same hand on both machines. That holds
+                // for a bed inside a save-resident building and NOT for the two
+                // cases players actually meet: a bed placed during the session
+                // (a runtime object, hand only exists on the placer) and a
+                // town's loose bedrolls, which are scatter-placed per world LOAD
+                // and so differ in hand AND position between the two clients
+                // (manual 2026-08-17: "the sleeping bags sit in different spots
+                // on each peer"). For those the hand named nothing here,
+                // applyFurniture refused the enter ("enter needs the real
+                // fixture") and the reported bug followed: carry a peer's KO'd
+                // body to a bed and it goes in on the carrier's screen while it
+                // drops to the floor on its owner's.
+                //
+                // Fall back to the nearest name-matching fixture, the same
+                // search the drive's occupancy self-heal already trusts, anchored
+                // on where OUR copy of the occupant stands. That anchor is sound
+                // precisely in the case that fails: the body was carried to the
+                // bed, so both machines have it within a couple of units of one.
+                const char* via = "hand";
+                if (!ok && occ && (kind == 1 || kind == 2)) {
+                    float ox = 0.0f, oy = 0.0f, oz = 0.0f;
+                    if (engine::readPos(occ, &ox, &oy, &oz)) {
+                        via = "near";
+                        ok = engine::enterFurnitureNearPos(gw, occ, kind, ox, oy, oz,
+                                                           FURN_MATCH_DIST);
+                    }
+                }
+                char fb[192]; _snprintf(fb, sizeof(fb) - 1,
+                    "[furn] RECV ENTER id=%u occ=%u,%u furn=%u,%u kind=%d ok=%d via=%s",
                     ev.eventId, ev.sIndex, ev.sSerial, ev.aIndex, ev.aSerial,
-                    kind, ok ? 1 : 0);
+                    kind, ok ? 1 : 0, via);
                 fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
                 break;
             }

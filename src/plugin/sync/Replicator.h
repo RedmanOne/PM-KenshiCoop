@@ -937,6 +937,10 @@ private:
         // Third-party placement (protocol 36): last time the host authored a
         // PEER-ENTER for this peer-owned driven body (re-author throttle).
         unsigned long furnPeerTick;
+        // Log throttle for the in-furniture down hold: a KO'd occupant's copy
+        // that has woken up and left the bed is re-knocked-down, and only that
+        // transition is logged (the steady-state timer top-up is silent).
+        unsigned long furnDownMs;
         // Chained/pole prisoner (protocol 41): the OWNER hand last seen for this
         // body while it was locally chained, so a lost/late reliable ENTER (or
         // an AI break-out) can be self-healed by re-applying setChainedMode -
@@ -1049,6 +1053,7 @@ private:
                    trusted(false), agreeStreak(0),
                    carryHealTick(0), carryNoSeeTick(0),
                    furnHealTick(0), furnNoSeeTick(0), furnPeerTick(0),
+                   furnDownMs(0),
                    haveChainOwner(false), chainHealTick(0),
                    sneakTick(0), proneTick(0), crawlDrive(false),
                    velPeak(0.0f), moveSeenMs(0), wasMoving(false),
@@ -1633,6 +1638,13 @@ private:
     bool           storeSync_;
     unsigned long  contCensusMs_;
     std::set<Key>  censusContainers_;
+    // First-sight diagnostic set for the census (protocol 34). A container that
+    // never reaches censusContainers_ produces no traffic at all, so a chest
+    // that "does not sync" looks identical in the log to one that was never
+    // enumerated - which is exactly the ambiguity the reported world-chest bug
+    // sat in. One line per hand the census has EVER walked (kept or dropped)
+    // resolves it without adding per-tick noise.
+    std::set<Key>  censusSeen_;
 
     // Phase W1 world-item state.
     // HOST: worldTrack_ maps a ground item's LOCAL engine hand (Key) to its assigned

@@ -622,6 +622,44 @@ void Replicator::applyTargets(GameWorld* gw) {
                     jb[sizeof(jb) - 1] = '\0'; coop::logLine(jb);
                 }
             }
+            // ---- Hold a DOWN occupant unconscious (2026-08-17) -----------------
+            // Every branch below `continue`s out before the down enforcement, on
+            // the sound grounds that its co-locate would rip a body out of the
+            // furniture it is anchored to. But that skipped the KNOCKDOWN along
+            // with the teleport, so a KO'd body carried into a bed was never put
+            // under on the peer at all: the copy lay there awake, its own engine
+            // stood it up, a brawl in the room pulled it into the fight, and the
+            // 1.5 s occupancy self-heal dragged it back - the reported "the
+            // wounded one keeps teleporting out of the bed, fights for a while,
+            // then teleports back", measured as 47 s of unbroken HEAL ENTER
+            // kind=1 ok=1 at exactly FURN_HEAL_MS while its owner streamed the
+            // body down (blood 47, a part at 0.0).
+            //
+            // Reproduce the unconsciousness WITHOUT the position half. holdDown
+            // is pure medical state - it tops up the forced-KO timer that
+            // suppresses the get-up AI - so it cannot disturb the attach; the
+            // knockDown for a copy that already got up prefers the same medical
+            // knockout and only ragdolls if that is unresolved. Gated on the
+            // OWNER's verdict (streamed bits + our latches), so a body its owner
+            // has woken is released normally by the branches below.
+            if ((streamKind != 0 || localKind != 0) &&
+                (coop::bodyIsDown(out.bodyState) || d.koLatched || d.deathLatched)) {
+                unsigned short furnBs = engine::readBodyState(c);
+                if (!coop::bodyIsDown(furnBs)) {
+                    engine::knockDown(c, true);
+                    // Only the transition is worth a line: a copy that stayed
+                    // down just gets its timer topped up, silently, every tick.
+                    if (d.furnDownMs == 0 || (now - d.furnDownMs) >= 3000) {
+                        d.furnDownMs = now;
+                        char b[160]; _snprintf(b, sizeof(b) - 1,
+                            "[furn] DOWN-HOLD occ=%u,%u kind=%d/%d (copy woke up in furniture)",
+                            out.hIndex, out.hSerial, streamKind, localKind);
+                        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                    }
+                } else {
+                    engine::holdDown(c);
+                }
+            }
             // Remember the owner hand while locally chained, so a lost/late
             // reliable ENTER (or an AI break-out) can be re-applied below (the
             // continuous BODY_CHAINED bit carries no owner).

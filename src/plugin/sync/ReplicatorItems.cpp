@@ -47,11 +47,43 @@ void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
             unsigned int n = engine::enumContainersNear(gw, 100.0f, rows, MAX_CONT);
             censusContainers_.clear();
             for (unsigned int i = 0; i < n; ++i) {
-                if (!rows[i].hasInv) continue; // no Inventory = nothing to author
                 Key k; k.t = rows[i].hand[0]; k.c = rows[i].hand[1];
                 k.cs = rows[i].hand[2]; k.i = rows[i].hand[3];
                 k.s = rows[i].hand[4];
+                // One line the first time this hand is ever walked, kept or not.
+                // A container the census never reaches is silent everywhere else
+                // in the log, so without this a world chest that is out of range,
+                // over the row budget or Inventory-less is indistinguishable from
+                // one whose snapshot simply failed to cross.
+                if (censusSeen_.insert(k).second) {
+                    char cb[256];
+                    _snprintf(cb, sizeof(cb) - 1,
+                        "[store] census hand=%u,%u,%u,%u,%u cls=%d complete=%d "
+                        "inv=%d items=%d qty=%d sid='%s' name='%s'",
+                        k.t, k.c, k.cs, k.i, k.s, rows[i].classType,
+                        rows[i].complete, rows[i].hasInv, rows[i].nEntries,
+                        rows[i].qtyTotal, rows[i].sid, rows[i].name);
+                    cb[sizeof(cb) - 1] = '\0'; coop::logLine(cb);
+                }
+                if (!rows[i].hasInv) continue; // no Inventory = nothing to author
                 censusContainers_.insert(k);
+            }
+            // A census that came back FULL was cut by the row budget. The
+            // enumeration keeps the containers nearest the players, so the ones
+            // a player is standing at survive the cut - but a base or town that
+            // exceeds the budget still has containers outside the sync, and this
+            // is the line that says so. Throttled like the query-full line.
+            if (n >= MAX_CONT) {
+                static unsigned long lastCapMs = 0;
+                if (lastCapMs == 0 || (cnow - lastCapMs) >= 30000) {
+                    lastCapMs = cnow;
+                    char cb[160];
+                    _snprintf(cb, sizeof(cb) - 1,
+                        "[store] census rows FULL n=%u cap=%u "
+                        "(farthest containers dropped from the sync)",
+                        n, MAX_CONT);
+                    cb[sizeof(cb) - 1] = '\0'; coop::logLine(cb);
+                }
             }
         }
         owned.insert(censusContainers_.begin(), censusContainers_.end());
@@ -313,7 +345,8 @@ void Replicator::applyInventories(GameWorld* gw) {
             items = adj.empty() ? 0 : &adj[0];
             n = (unsigned int)adj.size();
         }
-        engine::applyContainerContents(gw, cHand, items, n, it->second.truncated);
+        bool applied = engine::applyContainerContents(gw, cHand, items, n,
+                                                      it->second.truncated);
         // Keep the transfer detector blind to the reconcile we just performed.
         xferRebase(gw, k);
         char b[160];
@@ -321,6 +354,32 @@ void Replicator::applyInventories(GameWorld* gw) {
             "[inv] APPLY hand=%u,%u,%u,%u,%u items=%u",
             k.t, k.c, k.cs, k.i, k.s, n);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        // applyContainerContents returns false for BOTH "nothing to change" and
+        // "could not touch this container at all", and the second one is a real
+        // desync the log had no way to show: a world chest whose local copy has
+        // no Inventory (or whose hand names nothing here) silently keeps the
+        // stale contents while the author believes the snapshot landed. Separate
+        // the two by re-reading, and only speak up for the failure.
+        if (!applied) {
+            unsigned int reason = 0; // 1 = hand unresolved, 2 = no inventory
+            if (engine::resolveObjectByHand(cHand) == 0) reason = 1;
+            else {
+                InvItemEntry probe[1];
+                unsigned int hp = 0;
+                if (engine::captureContainerContents(gw, cHand, probe, 1, &hp) == 0 &&
+                    hp == 0 && n > 0)
+                    reason = 2;
+            }
+            if (reason != 0) {
+                char nb[192];
+                _snprintf(nb, sizeof(nb) - 1,
+                    "[inv] APPLY-FAILED hand=%u,%u,%u,%u,%u items=%u reason=%s "
+                    "(peer contents cannot be reproduced here)",
+                    k.t, k.c, k.cs, k.i, k.s, n,
+                    (reason == 1) ? "unresolved" : "no-inventory");
+                nb[sizeof(nb) - 1] = '\0'; coop::logLine(nb);
+            }
+        }
         if (it->second.truncated) {
             char t[160]; _snprintf(t, sizeof(t) - 1,
                 "[inv] APPLY-TRUNCATED hand=%u,%u,%u,%u,%u items=%u (additive-only; no deletes)",
