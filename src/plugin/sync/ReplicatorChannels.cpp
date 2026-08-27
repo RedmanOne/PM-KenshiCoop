@@ -81,7 +81,22 @@ static void fillMedicalPacket(MedicalPacket& pkt, const unsigned int subj[5],
     pkt.ownerId = ownerId;
     pkt.sType = subj[0]; pkt.sContainer = subj[1]; pkt.sContainerSerial = subj[2];
     pkt.sIndex = subj[3]; pkt.sSerial = subj[4];
-    pkt.blood     = mr.blood;
+    // Floor blood/flesh/stun at 0 before they ever reach the wire. writeMedical
+    // (EngineSpawnCombat.cpp) treats ANY negative flesh/fleshStun as the "-1 =
+    // owner's field is unreadable, don't touch" sentinel and silently SKIPS
+    // writing that part - but Kenshi's own engine can legitimately read a part's
+    // flesh well below zero (an overkilled part), and the true owner's local
+    // simulation tolerates that fine. Sent raw, that genuine negative value
+    // collided with the wire's sentinel convention: the receiving driven copy's
+    // part just froze at its last >=0 reading (near-zero - critically damaged)
+    // forever, since every subsequent update for that part was silently
+    // dropped. Measured live (2026-08-16, dust-bandit fight -> shop toss): one
+    // part drifted to -48 on the true owner (who stayed conscious throughout)
+    // while its driven copy on the peer, stuck re-reading that frozen near-zero
+    // value every tick, oscillated in and out of unconsciousness for the rest
+    // of the session (22 stand-up/collapse cycles in ~4 minutes) even though
+    // the real owner and the streamed posture both said upright the whole time.
+    pkt.blood     = (mr.blood < 0.0f) ? 0.0f : mr.blood;
     pkt.bleedRate = mr.bleedRate;
     pkt.hunger    = mr.hunger; // -1 when not carried (hungerSync off)
     pkt.fed       = mr.fed;
@@ -95,8 +110,8 @@ static void fillMedicalPacket(MedicalPacket& pkt, const unsigned int subj[5],
         e.used      = pr.used ? 1 : 0;
         e.partType  = pr.partType;
         e.side      = pr.side;
-        e.flesh     = pr.flesh;
-        e.fleshStun = pr.fleshStun;
+        e.flesh     = (pr.flesh     < 0.0f) ? 0.0f : pr.flesh;
+        e.fleshStun = (pr.fleshStun < 0.0f) ? 0.0f : pr.fleshStun;
         e.bandaging = pr.bandaging;
         e.juryRig   = pr.juryRig;
     }
@@ -272,6 +287,26 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         // engage (the posture apply in applyTargets is the other half).
         w.crippled    = (p.flags & MED_CRIPPLED) != 0;
         engine::writeMedical(c, w);
+        // Receive-side mirror of the "[med] SEND" log (2026-08-16, healthbar-sync
+        // diagnosis): applyMedical previously never logged anything on a
+        // successful (or failed-resolve) apply, so a session capture could show
+        // the host sending vitals for a fought world NPC but gave no way to tell
+        // whether the join actually received/wrote them - the exact ambiguity
+        // that blocked diagnosing "bodypart healthbars don't sync". Logged at
+        // the same ~1 Hz cadence the sender already throttles to.
+        {
+            float minFl = 1e9f;
+            for (unsigned int i = 0; i < n; ++i) {
+                if (!w.parts[i].used) continue;
+                if (w.parts[i].flesh >= 0.0f && w.parts[i].flesh < minFl)
+                    minFl = w.parts[i].flesh;
+            }
+            if (minFl > 1e8f) minFl = -1.0f;
+            char mb[192]; _snprintf(mb, sizeof(mb) - 1,
+                "[med] RECV hand=%u,%u blood=%.1f nparts=%u pmin=%.1f",
+                k.i, k.s, p.blood, n, minFl);
+            mb[sizeof(mb) - 1] = '\0'; coop::logLine(mb);
+        }
         // Limb-state self-heal (Phase C/D): reconcile stump/crushed/robotic
         // state with the owner's. The reliable EVT_AMPUTATE/EVT_CRUSH events
         // carry the transition moment; this closes any gap (late join, missed
@@ -297,6 +332,11 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
             // forwarded; re-arm the detector against the new baseline.
             if (r.sentBand[i] >= 0.0f && band >= r.sentBand[i] - 0.25f)
                 r.sentBand[i] = -1.0f;
+            // Protocol 60: same re-arm for the flesh baseline.
+            float flesh = (i < n && p.parts[i].used) ? p.parts[i].flesh : -1.0f;
+            r.recvFlesh[i] = flesh;
+            if (r.sentFlesh[i] >= 0.0f && flesh >= r.sentFlesh[i] - 0.25f)
+                r.sentFlesh[i] = -1.0f;
         }
         r.have = true;
     }
@@ -321,16 +361,32 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         memset(&tp, 0, sizeof(tp));
         bool rise = false;
         int nRise = 0; float hiBand = -1.0f;
+        // Protocol 60: flesh rides the same detector as bandaging - the
+        // healer's local applyFirstAid raises BOTH on the driven copy, but
+        // only bandaging used to forward, so the owner's real flesh only
+        // caught up via its own slow passive regen and every vitals echo
+        // snapped the healer's already-healed screen back down.
+        int nFleshRise = 0; float hiFlesh = -1.0f;
         for (unsigned int i = 0; i < 12; ++i) {
             tp.partBand[i] = -1.0f;
             float local = (i < mr.nParts && mr.parts[i].used) ? mr.parts[i].bandaging : -1.0f;
-            if (local < 0.0f || r.recvBand[i] < 0.0f) continue;
-            if (local > r.recvBand[i] + RISE_EPS &&
+            if (local >= 0.0f && r.recvBand[i] >= 0.0f &&
+                local > r.recvBand[i] + RISE_EPS &&
                 (r.sentBand[i] < 0.0f || local > r.sentBand[i] + RISE_EPS)) {
                 tp.partBand[i] = local;
                 r.sentBand[i]  = local;
                 rise = true; ++nRise;
                 if (local > hiBand) hiBand = local;
+            }
+            tp.partFlesh[i] = -1.0f;
+            float localFlesh = (i < mr.nParts && mr.parts[i].used) ? mr.parts[i].flesh : -1.0f;
+            if (localFlesh >= 0.0f && r.recvFlesh[i] >= 0.0f &&
+                localFlesh > r.recvFlesh[i] + RISE_EPS &&
+                (r.sentFlesh[i] < 0.0f || localFlesh > r.sentFlesh[i] + RISE_EPS)) {
+                tp.partFlesh[i] = localFlesh;
+                r.sentFlesh[i]  = localFlesh;
+                rise = true; ++nFleshRise;
+                if (localFlesh > hiFlesh) hiFlesh = localFlesh;
             }
         }
         if (!rise) continue;
@@ -345,6 +401,12 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
             "[med] TREAT SEND id=%u hand=%u,%u parts=%d hi=%.1f",
             tp.treatId, k.i, k.s, nRise, hiBand);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        if (nFleshRise > 0) {
+            char fb[160]; _snprintf(fb, sizeof(fb) - 1,
+                "[med] TREAT FLESH SEND id=%u hand=%u,%u parts=%d hi=%.1f",
+                tp.treatId, k.i, k.s, nFleshRise, hiFlesh);
+            fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
+        }
     }
 }
 
@@ -362,14 +424,50 @@ void Replicator::applyTreatments(GameWorld* gw, Inbound& in) {
         // (log-visible, ignored).
         bool authority = ownHands_.find(k) != ownHands_.end() ||
                          (streamNpcs_ && medNpc_.find(k) != medNpc_.end());
+        Character* c = 0;
+        if (!authority && streamNpcs_) {
+            // medNpc_ only tracks a world NPC while it's fighting, recently
+            // fought, or down (publishOwned's Phase B qualification) - a
+            // conscious, wounded NPC being bandaged well after its fight ended
+            // ages out of that window (MEDNPC_STALE_MS = 10s) and every
+            // treatment for it silently hit the drop above from then on: the
+            // owner's real body froze at its last synced value (no more TREAT
+            // RECV ever applied) while the healer's driven copy - still getting
+            // real local first-aid from Kenshi's own engine, just with nothing
+            // left to reconcile it against - drifted on its own local
+            // simulation (a peer reported a chest at -53 the owner's screen
+            // still showed at -2). A live treatment for a body we can still
+            // resolve is itself proof it's still relevant: reclaim authority
+            // and re-arm the vitals stream so publishOwned picks it back up
+            // next tick, instead of dropping every packet for a body that
+            // quietly aged out mid-treatment.
+            c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+            if (c) {
+                medNpc_[k] = nowMs();
+                authority = true;
+                char rb[128]; _snprintf(rb, sizeof(rb) - 1,
+                    "[med] TREAT REARM hand=%u,%u", k.i, k.s);
+                rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+            }
+        }
         if (!authority) continue;
-        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!c) c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
         if (!c) continue;
         int n = engine::applyBandageParts(c, p.partBand);
         char b[160]; _snprintf(b, sizeof(b) - 1,
             "[med] TREAT RECV id=%u hand=%u,%u applied=%d",
             p.treatId, k.i, k.s, n);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        // Protocol 60: the flesh gain the healer's local first aid already
+        // produced, applied raise-only so the owner's real body catches up
+        // immediately instead of lagging behind on its own passive regen.
+        int nf = engine::applyFleshParts(c, p.partFlesh);
+        if (nf > 0) {
+            char fb[160]; _snprintf(fb, sizeof(fb) - 1,
+                "[med] TREAT FLESH RECV id=%u hand=%u,%u applied=%d",
+                p.treatId, k.i, k.s, nf);
+            fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
+        }
     }
 }
 

@@ -92,7 +92,7 @@ static void testSizes() {
 
     CHECK_EQ("sizeof(MedPartEntry)",            sizeof(MedPartEntry),            19);
     CHECK_EQ("sizeof(MedicalPacket)",           sizeof(MedicalPacket),           467);
-    CHECK_EQ("sizeof(TreatmentPacket)",         sizeof(TreatmentPacket),         77);
+    CHECK_EQ("sizeof(TreatmentPacket)",         sizeof(TreatmentPacket),        125);
     CHECK_EQ("sizeof(CombatHitPacket)",         sizeof(CombatHitPacket),         37);
     CHECK_EQ("sizeof(SpeedPacket)",             sizeof(SpeedPacket),             14);
     CHECK_EQ("sizeof(StatsPacket)",             sizeof(StatsPacket),             194);
@@ -313,8 +313,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v58: inventory save fence)",
-             (int)PROTOCOL_VERSION, 58);
+    CHECK_EQ("PROTOCOL_VERSION (v60: treatment flesh delta)",
+             (int)PROTOCOL_VERSION, 60);
     CHECK_EQ("inventory save fence packet id", (int)PKT_INV_SAVE_FENCE, 50);
     CHECK("PKT_INV_SAVE_FENCE distinct", PKT_INV_SAVE_FENCE != PKT_NATIVE_TAKEN && PKT_INV_SAVE_FENCE != PKT_FIXTURE);
     {
@@ -460,6 +460,14 @@ static void testSizes() {
     // A claim batch is capped by the u8 count; even a full one must fit a datagram.
     CHECK("full world-item claim fits datagram",
           sizeof(WorldItemClaimHeader) + 255 * sizeof(u32) <= 1400);
+
+    // Protocol 60: the flesh delta rides the same per-ANATOMY-part width as the
+    // bandage delta, because applyFleshParts is the applyBandageParts twin and
+    // both index the packet by the same anatomy slot. A width mismatch here
+    // would silently mis-key every forwarded heal.
+    CHECK_EQ("TreatmentPacket partFlesh width",
+             (int)(sizeof(((TreatmentPacket*)0)->partFlesh) / sizeof(f32)),
+             (int)(sizeof(((TreatmentPacket*)0)->partBand)  / sizeof(f32)));
 }
 
 // ---- 2. readPacket / packetType round-trips -----------------------------------

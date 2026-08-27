@@ -25,7 +25,7 @@ typedef double         f64;
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 58;
+const u16 PROTOCOL_VERSION = 60;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -941,6 +941,15 @@ struct MedicalPacket {
 // packet idempotent; the vitals stream then mirrors the healed state back to
 // everyone. treatId is per-sender monotonic for log correlation. Protocol 16:
 // levels are keyed by ANATOMY INDEX (all parts, not just the 4 limbs).
+//
+// Protocol 60: partFlesh carries the same raise-only treatment for the FLESH
+// (actual health) the healer's local applyFirstAid already produced on the
+// driven copy, detected and forwarded the same way as partBand. Without this,
+// only bandaging reached the owner - the owner's real flesh only caught up
+// through its own slow passive bandaging->flesh regen, so every subsequent
+// vitals snapshot from the owner (still low) overwrote the healer's already-
+// healed screen back down, once per publish tick (the "heals but keeps
+// resetting" bug).
 struct TreatmentPacket {
     u8  type;    // = PKT_TREATMENT
     u32 ownerId; // network player id of the sender (the HEALER's machine)
@@ -951,7 +960,8 @@ struct TreatmentPacket {
     u32 sContainerSerial;
     u32 sIndex;
     u32 sSerial;
-    f32 partBand[MED_PARTS_MAX]; // bandage level per anatomy part (-1 = not raised)
+    f32 partBand[MED_PARTS_MAX];  // bandage level per anatomy part (-1 = not raised)
+    f32 partFlesh[MED_PARTS_MAX]; // flesh level per anatomy part (-1 = not raised)
 };
 
 // Join-dealt authoritative damage report (protocol 45; join -> host). World-NPC

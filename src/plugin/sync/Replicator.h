@@ -1963,12 +1963,12 @@ private:
     // Phase-2 medical channel state.
     // medPub_: per OWNED member, the last SENT quantized fingerprint + send time
     //   (change gate + periodic safety resend, the inventory-snapshot pattern).
-    // medRecv_: per DRIVEN body, the last RECEIVED bandage levels + when we last
-    //   forwarded a treatment (throttle). The detector compares the copy's LOCAL
-    //   bandaging against these: local > received means first aid happened HERE
-    //   (the stream can only set it back to the owner's level, so the comparison
-    //   has no race). sentBand[] remembers what we already forwarded so an
-    //   unacknowledged rise isn't re-sent every tick.
+    // medRecv_: per DRIVEN body, the last RECEIVED bandage/flesh levels + when we
+    //   last forwarded a treatment (throttle). The detector compares the copy's
+    //   LOCAL bandaging/flesh against these: local > received means first aid
+    //   happened HERE (the stream can only set it back to the owner's level, so
+    //   the comparison has no race). sentBand[]/sentFlesh[] remember what we
+    //   already forwarded so an unacknowledged rise isn't re-sent every tick.
     // limbPrev[]: the last PUBLISHED LimbStates (0xFF = never read) - an edge to
     //   STUMP/CRUSHED authors the reliable EVT_AMPUTATE/EVT_CRUSH transition
     //   (doctrine 16; the packet's limbState[] is the self-heal).
@@ -1979,11 +1979,18 @@ private:
         }
     };
     // Protocol 16: bandage levels are tracked per ANATOMY PART (12 slots), not
-    // per limb - first aid on a head wound forwards too.
+    // per limb - first aid on a head wound forwards too. Protocol 60: flesh
+    // levels ride the same per-part tracking (recvFlesh_/sentFlesh_) so the
+    // healer's already-realized flesh gain forwards the same way bandaging does.
     struct MedRecv {
-        float recvBand[12]; float sentBand[12]; unsigned long lastFwdMs; bool have;
+        float recvBand[12]; float sentBand[12];
+        float recvFlesh[12]; float sentFlesh[12];
+        unsigned long lastFwdMs; bool have;
         MedRecv() : lastFwdMs(0), have(false) {
-            for (int i = 0; i < 12; ++i) { recvBand[i] = -1.0f; sentBand[i] = -1.0f; }
+            for (int i = 0; i < 12; ++i) {
+                recvBand[i] = -1.0f; sentBand[i] = -1.0f;
+                recvFlesh[i] = -1.0f; sentFlesh[i] = -1.0f;
+            }
         }
     };
     std::map<Key, MedPub>  medPub_;
