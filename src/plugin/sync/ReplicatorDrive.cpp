@@ -156,6 +156,34 @@ void Replicator::applyTargets(GameWorld* gw) {
         case EntityInterp::SM_SEG_SNAP:  ++interpSegSnap_;  break;
         default: break;
         }
+        // ...and the same sample charged to its TIER, so the near band's health
+        // is readable on its own. Every body is counted here, including the ones
+        // that `continue` out below into combat/carry/furniture/down, because
+        // the question this answers is about the STREAM, not the drive regime.
+        {
+            bool starved = d.interp.lastMode() == EntityInterp::SM_EXTRAP ||
+                           d.interp.lastMode() == EntityInterp::SM_CLAMP_OLD;
+            // Classify from the BUFFER's own cadence, not Driven::wasMid. wasMid
+            // is only refreshed by bodies that reach the tier line far below, and
+            // half of them `continue` out before it (combat, carry, furniture,
+            // down, trust, the mid-rest release) - so a body released while quiet
+            // and re-acquired seconds later still carried a stale wasMid=false and
+            // charged its whole re-acquisition gap to the NEAR ledger. That is
+            // what made nearSeg read 8147 ms while the host's transmit clock was
+            // provably flat at 50, and it would have sent this investigation after
+            // a near-band dropout that never happened.
+            bool midish = d.interp.avgInterval() > 250.0f ||
+                          d.interp.lastSegMs() > 250;
+            if (midish) {
+                ++interpMidN_;
+                if (starved) ++interpMidStarve_;
+            } else {
+                ++interpNearN_;
+                if (starved) ++interpNearStarve_;
+                unsigned long sg = d.interp.lastSegMs();
+                if (sg > interpNearMaxSeg_) interpNearMaxSeg_ = sg;
+            }
+        }
 
         Character* c = engine::resolve(out);
         // Protocol 21: a streamed hand with NO local body is a host RUNTIME
@@ -837,9 +865,20 @@ void Replicator::applyTargets(GameWorld* gw) {
             // A ragdoll/KO falls independently on each client (and the join's local
             // AI may have walked the body elsewhere before the down state arrived),
             // so co-locate it with the host's down position when it has drifted.
-            // Teleport (not walk) - a limp body has no gait to preserve.
-            if (haveActual && dist3(ax, ay, az, out.x, out.y, out.z) > 2.0f)
-                engine::applyRaw(c, out);
+            // A limp body has no gait to preserve, but it does have a POSITION the
+            // player is watching - and this fires while a fight is going on, right
+            // where the player is looking. Glide it on rather than snapping it:
+            // same destination, reached over a few frames instead of one.
+            if (haveActual && dist3(ax, ay, az, out.x, out.y, out.z) > 2.0f) {
+                unsigned long ddt = (d.smoothMs != 0 && now > d.smoothMs)
+                                        ? (now - d.smoothMs) : 0;
+                d.smoothMs = now;
+                if (!smoothCorrect(c, out, ax, ay, az, ddt,
+                                   /*tau*/ 0.0f /*size-scaled*/,
+                                   /*maxGlide*/ 90.0f /*+50%*/,
+                                   /*minRate*/ 2.0f))
+                    engine::applyRaw(c, out);
+            }
             d.downApplied = true;
             d.parked = false; d.haveDest = false;
             if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
@@ -1092,7 +1131,27 @@ void Replicator::applyTargets(GameWorld* gw) {
                 // fighting 211-306 u away, closing only one 3 s snap at a time.
                 if (trueLeave &&
                     (srcTeleport || (now - d.combatSnapTick) >= COMBAT_SNAP_COOL_MS)) {
-                    engine::applyRaw(c, out);
+                    // GLIDE the correction rather than placing it. A combatant's
+                    // position is owned by the local engine's footwork, so this
+                    // does not order, halt or re-pose anything - it just
+                    // translates the body a little each frame while it keeps
+                    // fighting, and the error is gone in ~2 tau. Only a gap too
+                    // large to glide (COMBAT_GLIDE_MAX) still places outright:
+                    // past that the body is not drifting, it is somewhere else,
+                    // and sliding it across would take seconds of walking
+                    // through whatever lies between.
+                    // This is the correction the user saw as a ~10 u jump on an
+                    // attacking, otherwise well-tracking (DRV) enemy.
+                    const float COMBAT_GLIDE_TAU_MS = 0.0f;   // size-scaled
+                    const float COMBAT_GLIDE_MAX    = 135.0f; // +50%
+                    const float COMBAT_GLIDE_MIN    = 2.0f;   // u/s convergence floor
+                    unsigned long cdt = (d.smoothMs != 0 && now > d.smoothMs)
+                                            ? (now - d.smoothMs) : 0;
+                    d.smoothMs = now;
+                    bool glided = smoothCorrect(c, out, ax, ay, az, cdt,
+                                                COMBAT_GLIDE_TAU_MS,
+                                                COMBAT_GLIDE_MAX, COMBAT_GLIDE_MIN);
+                    if (!glided) engine::applyRaw(c, out);
                     // Whatever the local AI was doing, it decided it at the OLD place:
                     // the goal outlives the teleport and walks the copy straight back,
                     // which is what turned one displacement into a standing one.
@@ -1238,7 +1297,18 @@ void Replicator::applyTargets(GameWorld* gw) {
                         float drift = dist3(ax, ay, az, out.x, out.y, out.z);
                         if (drift > COMBAT_SNAP_DIST &&
                             (now - d.combatSnapTick) >= COMBAT_SNAP_COOL_MS) {
-                            engine::applyRaw(c, out);
+                            // Glide, for the same reason as the combat band: the
+                            // carrier's own walk owns its feet and must not be
+                            // disturbed, and a passenger on its shoulder makes a
+                            // teleport doubly visible (two bodies jump at once).
+                            unsigned long kdt = (d.smoothMs != 0 && now > d.smoothMs)
+                                                    ? (now - d.smoothMs) : 0;
+                            d.smoothMs = now;
+                            if (!smoothCorrect(c, out, ax, ay, az, kdt,
+                                               /*tau*/ 0.0f /*size-scaled*/,
+                                               /*maxGlide*/ 135.0f /*+50%*/,
+                                               /*minRate*/ 2.0f))
+                                engine::applyRaw(c, out);
                             d.combatSnapTick = now;
                             { char b[128]; _snprintf(b, sizeof(b) - 1,
                                 "[carry] npc snap hand=%u,%u drift=%.1f",
@@ -1457,6 +1527,7 @@ void Replicator::applyTargets(GameWorld* gw) {
         // pipeline, the mid tier is judged by the anti-zombie oracle.
         bool midTier = !isSquad && segMs > 250;
         if (midTier) d.midSeenMs = now;
+        d.wasMid = midTier; // charged to the NEXT tick's sample (see interpNearN_)
         if (!isSquad) {
             if (d.wasMoving && !npcMoving) {
                 if (midTier) ++restFlipMid_;
@@ -1508,7 +1579,15 @@ void Replicator::applyTargets(GameWorld* gw) {
         // trailed farther). Movers stay driven - the anti-zombie fix - and
         // the release also skips the AI suspend below, so the local AI can
         // idle the body naturally between host movements.
-            if (!isSquad && midTier && !npcMoving) {
+        // ...and with the ladder on, it must NOT happen. The release exists
+        // because the old sender skipped stationary mid bodies, so a still body
+        // legitimately had no stream to follow and local AI was the least-bad
+        // fallback. But handing a body back to local AI is also how it walks
+        // away from where its counterpart stands, and the only thing that ever
+        // pulled it back was the census park's teleport. The ladder streams
+        // stationary bodies too, so there is a stream to follow now, and keeping
+        // the body driven is both cheaper than a teleport and correct.
+            if (!isSquad && midTier && !npcMoving && !ladderStream_) {
                 drivenChars_.erase(c);
                 drivenSeen_.erase(c); // wide pass may census-park it again
                 d.parked = false; d.haveDest = false;
@@ -1586,6 +1665,37 @@ void Replicator::applyTargets(GameWorld* gw) {
             d.goalsCleared = false; // next rest episode gets one fresh goal-clear
         }
 
+        // ---- Kinematic world-NPC drive (2026-08-17) ---------------------------
+        // See Replicator::setNpcKinematic for the measurement that motivates
+        // this. Short version: asking the join's engine to WALK a remote NPC
+        // costs a path restart or a clip reset at stream cadence, and the body
+        // still ends up seconds behind. So don't ask - place it.
+        //
+        // Order of precedence inside the regime:
+        //   1. A reproducible fixture POSE (sit/mine/operate at a resolved
+        //      object) still wins, exactly as before. When applyRest commits
+        //      one the ENGINE owns the transform, and placing over it would
+        //      fight the seat every frame - that is the seat-drift artifact the
+        //      pose path already learned about. poseOnly=true keeps its pose
+        //      decision and drops only its park fallback.
+        //   2. Otherwise place on the interpolated sample and mirror the
+        //      streamed locomotion, moving or not. One code path for both, so
+        //      there is no walk/rest FORK left to flap across - which is what
+        //      kills restFlip. The classifier is still computed above (the
+        //      oracles and the pose re-arm read it), it just no longer selects
+        //      between two ways of moving the body.
+        //
+        // Both motion mirrors are written, for the two different consumers the
+        // crawl drive documented: CharMovement (walk/run clip selection) and the
+        // physics character (clip ADVANCE for a body the engine is not moving
+        // itself). A placed body has no physics-driven motion of its own, so
+        // without the second one it slides in a frozen pose.
+        // It is the FIRST arm of the drive chain below rather than an early
+        // `continue`, so the smoothness / anim-truth / march oracles at the
+        // bottom of the loop keep scoring these bodies. Those oracles are how
+        // this change gets judged; skipping them would make it unfalsifiable.
+        bool kinematic = npcKinematic_ && !isSquad && !crawling;
+
         // ---- Unified drive (Phase 3): one walk/rest/snap path for PCs and
         // NPCs. The kinds differ by POLICY, not code:
         //   * moving CLASSIFIER - a PC body is inert when uncontrolled, so
@@ -1627,7 +1737,41 @@ void Replicator::applyTargets(GameWorld* gw) {
             snapOk = gapNewest > snapGate * 3.0f &&
                      (!midTier || (now - d.npcSnapTick) >= NPC_SNAP_COOL_MS);
         }
-        if (genuinelyMoving && haveActual && gapNewest > snapGate && snapOk) {
+        // Accounting/classification, computed up front (2026-08-16 coverage-slide
+        // fix) so the snap-vs-slide DECISION can use it, not just the log label.
+        // A snap on a YOUNG ring (< 16 samples, ~0.8 s of 20 Hz coverage) is the
+        // one-time divergence reconciliation of a newly / re-acquired body (Phase
+        // 2 replaces the census park with it). A recent mid->near handoff (raid
+        // entering the 20 Hz bubble) is the same reconciliation debt: divergence
+        // accrued under sparse mid coverage. The clock-slew catch-up window is
+        // the same class again: while timeSlew_ != 1 the join sim runs at a
+        // different wall-clock rate than the host stream, so every divergent
+        // copy legitimately needs reconciliation.
+        bool slewing = timeSlew_ < 0.99f || timeSlew_ > 1.01f;
+        bool coverage = !isSquad &&
+                        (d.interp.samples() < 16 ||
+                         (d.midSeenMs != 0 && (now - d.midSeenMs) < 5000) ||
+                         slewing);
+        // This debt used to be PAID with an instant teleport unconditionally -
+        // "the smoothness oracle already excludes those frames" (measured
+        // acceptable for the oracle's steady-state metric). But measured live
+        // (2026-08-16, manual town session) it fired ~30x/min on an ordinary
+        // scene, gaps mostly 50-160 u, each one a visible pop on a nearby,
+        // clearly-visible body - sampling debt, not a genuine divergence. Below
+        // NPC_COVERAGE_SLIDE_MAX, pay it with the SAME capped-speed catch-up walk
+        // steady-state tracking already uses (falls through to the
+        // "genuinelyMoving" walk branch below) instead of engine::applyRaw - a
+        // fast run into place rather than a pop. Only a genuinely huge gap (a
+        // real warp, or debt accrued over an unusually long mid-tier dwell)
+        // still teleports outright; closing hundreds of units at capped NPC
+        // speed would itself look wrong.
+        const float NPC_COVERAGE_SLIDE_MAX = 200.0f;
+        bool coverageSlide = coverage && gapNewest <= NPC_COVERAGE_SLIDE_MAX;
+        if (kinematic) {
+            driveKinematic(c, d, out, haveActual, ax, ay, az, now, genuinelyMoving,
+                           midTier, isSquad);
+        } else if (genuinelyMoving && haveActual && gapNewest > snapGate && snapOk &&
+            !coverageSlide) {
             // Fell behind / source warped: hard-snap to the true position
             // (no-halt teleport keeps the clip phase advancing).
             engine::applyRaw(c, newest);
@@ -1635,28 +1779,11 @@ void Replicator::applyTargets(GameWorld* gw) {
                 ++hardSnapSquad_;
                 logHardSnap(c, out, "squad", gapNewest, vlen, snapGate, d.haveDest);
             } else {
-                // Accounting: a snap on a YOUNG ring (< 16 samples, ~0.8 s of
-                // 20 Hz coverage) is the one-time divergence reconciliation
-                // of a newly / re-acquired body (Phase 2 replaces the census
-                // park with it) - classed with the mid counter so the
-                // snap-rate gate keeps measuring steady-state tracking only.
-                // A recent mid->near handoff (raid entering the 20 Hz
-                // bubble) is the same reconciliation debt: divergence
-                // accrued under sparse mid coverage, paid with one snap
-                // right after the cadence flips near (run 123101: 'Fuu' gap
-                // 407 on a 20 Hz-classed ring whose history was mid-band).
-                // The clock-slew catch-up window is the same class again:
-                // while timeSlew_ != 1 the join sim runs at a different
-                // wall-clock rate than the host stream, so every divergent
-                // copy legitimately needs reconciliation teleports - the
-                // smoothness oracle already excludes those frames for the
-                // same reason (run 150302: coop_presence spent its whole 25 s
-                // at slew=2.00 and 4 session-start catch-up snaps tripped
-                // the steady-state npc gate).
-                bool slewing = timeSlew_ < 0.99f || timeSlew_ > 1.01f;
-                bool coverage = d.interp.samples() < 16 ||
-                                (d.midSeenMs != 0 && (now - d.midSeenMs) < 5000) ||
-                                slewing;
+                // classed with the mid counter so the snap-rate gate keeps
+                // measuring steady-state tracking only (run 123101: 'Fuu' gap
+                // 407 on a 20 Hz-classed ring whose history was mid-band; run
+                // 150302: coop_presence spent its whole 25 s at slew=2.00 and 4
+                // session-start catch-up snaps tripped the steady-state npc gate).
                 if (midTier || coverage) ++hardSnapMid_;
                 else                     ++hardSnapNpc_;
                 d.npcSnapTick = now;
@@ -2032,6 +2159,31 @@ void Replicator::logDriveTelemetry(unsigned long now) {
             walkReissueSquad_, walkReissueNpc_, restFlipNpc_, maxDelay, maxJit,
             starveHeldNow_, hardSnapMid_, restFlipMid_);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        // Per-TIER starvation + the kinematic drive's own ledger. delay/jit
+        // above are a MAX over every live buffer, so a single ~2 Hz mid body
+        // pins them high and says nothing about the 20 Hz near band (proved
+        // 2026-08-17: the transmit clock measured a flat 49-51 ms while that
+        // line still read jit=200). These two fractions separate the sender's
+        // cadence problem from the receiver's smoothing problem, which want
+        // opposite fixes. nearSeg is the worst sender-stamp gap a near-tier
+        // body has seen all session: a clean 20 Hz band tops out near one lost
+        // batch (~100 ms), so a large value means the near band itself is
+        // dropping out of the snapshot rather than jittering within it.
+        {
+            float nearF = interpNearN_
+                ? (float)interpNearStarve_ / (float)interpNearN_ : 0.0f;
+            float midF  = interpMidN_
+                ? (float)interpMidStarve_  / (float)interpMidN_  : 0.0f;
+            char t[224];
+            _snprintf(t, sizeof(t) - 1,
+                "[interp] tier nearN=%lu nearStarve=%.3f nearSeg=%lu "
+                "midN=%lu midStarve=%.3f kin=%d placed=%lu posed=%lu "
+                "absorbed=%lu glide=%lu hardPlace=%lu dead=%lu",
+                interpNearN_, nearF, interpNearMaxSeg_,
+                interpMidN_, midF, npcKinematic_ ? 1 : 0, kinPlaced_, kinPosed_,
+                kinAbsorbed_, smoothGlide_, smoothHardPlace_, smoothDead_);
+            t[sizeof(t) - 1] = '\0'; coop::logLine(t);
+        }
         // Worst zero-step contributor (Phase 2 smoothness diagnosis): name the
         // hand charging the most frozen-while-active frames to the oracle.
         {
@@ -2144,9 +2296,170 @@ void Replicator::sweepCarries(GameWorld* gw) {
     }
 }
 
-void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
+bool Replicator::smoothCorrect(Character* c, const EntityState& tgt,
+                               float ax, float ay, float az, unsigned long dtMs,
+                               float tauMs, float maxGlide, float minRate) {
+    float ex = tgt.x - ax, ey = tgt.y - ay, ez = tgt.z - az;
+    float len = std::sqrt(ex * ex + ey * ey + ez * ez);
+    if (len > maxGlide) { ++smoothHardPlace_; return false; } // caller teleports
+    // Dead zone: already close enough that moving the body would be noise.
+    if (len < (float)SMOOTH_DEADZONE_U) { ++smoothDead_; return true; }
+    float dt = (float)dtMs / 1000.0f;
+    if (dt <= 0.0f)   dt = 0.016f;   // first tick / same-ms: assume one frame
+    if (dt > 0.25f)   dt = 0.25f;    // a long stall must not close it in one go
+    // tauMs <= 0 asks for the size-scaled default (smoothTauMs).
+    if (tauMs <= 0.0f) tauMs = smoothTauMs(len);
+    float k = (tauMs > 1.0f) ? (dt / (tauMs / 1000.0f)) : 1.0f;
+    if (k > 1.0f) k = 1.0f;
+    float step = len * k;
+    float floorStep = minRate * dt;
+    if (step < floorStep) step = floorStep;
+    if (step > len)       step = len;
+    float s = step / len;
+    EntityState p = tgt;
+    p.x = ax + ex * s; p.y = ay + ey * s; p.z = az + ez * s;
+    engine::applyRaw(c, p);
+    ++smoothGlide_;
+    return true;
+}
+
+// ---- Kinematic world-NPC drive (2026-08-17) ---------------------------------
+// See Replicator::setNpcKinematic for the measurement behind this. Short
+// version: asking the join's engine to WALK a remote NPC costs a path restart
+// or a clip reset at stream cadence, and the body still ends up seconds behind.
+// So don't ask - place it.
+//
+// Precedence inside the regime:
+//   1. A reproducible fixture POSE (sit / mine / operate at a resolved object)
+//      still wins, exactly as before. When applyRest commits one the ENGINE
+//      owns the transform, and placing over it would fight the seat every
+//      frame - the seat-drift artifact the pose path already learned about.
+//      poseOnly=true keeps its pose decision and drops only its park fallback,
+//      because that fallback ends in park(), and park() halts, and halt()
+//      resets the clip phase.
+//   2. Otherwise place on the interpolated sample and mirror the streamed
+//      locomotion, moving or not. ONE path for both, so there is no walk/rest
+//      fork left to flap across - which is what kills restFlip, and with it
+//      the backwards yank a rest-entry park used to apply (the walk drive aims
+//      at newest+lead, the park teleports to the delayed interp pose, so every
+//      flip moved the body several units the wrong way).
+//
+// Both motion mirrors are written, for the two consumers the crawl drive
+// documented: CharMovement (walk/run clip SELECTION) and the physics character
+// (clip ADVANCE for a body the engine is not moving itself). A placed body has
+// no physics-driven motion of its own, so without the second one it slides in a
+// frozen pose - the same fact seen from the other side as "animates but cannot
+// move" when only the mirror was present.
+void Replicator::driveKinematic(Character* c, Driven& d, const EntityState& out,
+                                bool haveActual, float ax, float ay, float az,
+                                unsigned long now, bool genuinelyMoving,
+                                bool midTier, bool isSquad) {
+    bool posed = false;
+    if (!genuinelyMoving) {
+        // Same rest-entry stamp the ordinary rest branch keeps, so the march
+        // oracle can still tell a settle frame from a relapse.
+        if (d.walkBranchPrev || d.restEnterMs == 0) d.restEnterMs = now;
+        posed = applyRest(c, d, out, haveActual, ax, ay, az, now, isSquad,
+                          /*poseOnly*/ true);
+    }
+    if (posed) {
+        ++kinPosed_;
+        d.haveDest = false;
+        return;
+    }
+    ++kinPlaced_;
+    // A body whose physics character was torn down (a collapse it was
+    // AI-suspended through, so it never ran its own recovery) renders from a
+    // stale transform while every position read tracks correctly - the
+    // PHYS-RESTORE gap the down and crawl paths both hit. Placing is exactly
+    // the case that exposes it, so repair it here too.
+    if (!engine::hasPhysicsBody(c) && engine::restoreMovement(c)) {
+        char b[160]; _snprintf(b, sizeof(b) - 1,
+            "[kin] PHYS-RESTORE hand=%u,%u", out.hIndex, out.hSerial);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+    // ---- Render-offset smoothing ------------------------------------------
+    // Placing the body exactly on the interp sample renders whatever the sample
+    // does - including its discontinuities. A sparse stream that holds and then
+    // jumps (the ~2 Hz tiers), a re-acquisition, a rung change, a ring restart:
+    // each is a step in the target, and a step in the target was a step on
+    // screen. Absorb any step the source could not physically have made since
+    // the last frame into a render offset, keeping the drawn position exactly
+    // continuous, then bleed that offset off over KIN_SMOOTH_TAU_MS so the body
+    // glides onto the truth. Motion the source really made passes through
+    // untouched, and because this is an OFFSET rather than a rate-limited
+    // chase, following a moving target costs no steady-state lag.
+    // No dead zone here, deliberately. This is not a correction, it is the
+    // body's continuous position: refusing to write it until the target had
+    // pulled three paces ahead would hold the body still and then move it in
+    // one step, which is precisely the per-sample teleporting being fixed. The
+    // dead zone belongs on CORRECTIONS (smoothCorrect), and is applied there.
+    const float         KIN_ABSORB_MAX    = 180.0f; // above this it IS a warp (+50%)
+    const float         KIN_OFFSET_MAX    = 60.0f;  // never hold this far off truth
+    unsigned long dtMs = (d.smoothMs != 0 && now > d.smoothMs) ? (now - d.smoothMs) : 0;
+    d.smoothMs = now;
+    if (d.havePt) {
+        float jx = out.x - d.ptX, jy = out.y - d.ptY, jz = out.z - d.ptZ;
+        float jump = std::sqrt(jx * jx + jy * jy + jz * jz);
+        // What the source could plausibly have covered since the last frame.
+        // 3x its streamed speed plus a constant, so ordinary motion (and honest
+        // acceleration) is never mistaken for a discontinuity.
+        float spd   = (out.cSpeed > 1.0f) ? out.cSpeed : 12.0f;
+        float allow = spd * ((float)(dtMs ? dtMs : 16) / 1000.0f) * 3.0f + 0.75f;
+        if (jump > allow && jump <= KIN_ABSORB_MAX) {
+            d.soX += d.ptX - out.x;
+            d.soY += d.ptY - out.y;
+            d.soZ += d.ptZ - out.z;
+            ++kinAbsorbed_;
+        } else if (jump > KIN_ABSORB_MAX) {
+            // Too far to glide: the body is placed outright and the player sees
+            // a jump. Count it, so a teleport that survives all of this is a
+            // number in the log rather than something only the player notices.
+            ++smoothHardPlace_;
+        }
+    }
+    d.ptX = out.x; d.ptY = out.y; d.ptZ = out.z; d.havePt = true;
+    float ol = std::sqrt(d.soX * d.soX + d.soY * d.soY + d.soZ * d.soZ);
+    if (dtMs && ol > 0.0f) {
+        // Size-scaled, same curve the corrections use: a bigger offset takes
+        // longer to bleed off rather than moving the body faster.
+        float k = (float)dtMs / smoothTauMs(ol);
+        if (k > 1.0f) k = 1.0f;
+        d.soX -= d.soX * k; d.soY -= d.soY * k; d.soZ -= d.soZ * k;
+        ol = std::sqrt(d.soX * d.soX + d.soY * d.soY + d.soZ * d.soZ);
+    }
+    if (ol > KIN_OFFSET_MAX) {          // repeated absorbs must not accumulate
+        float s = KIN_OFFSET_MAX / ol;
+        d.soX *= s; d.soY *= s; d.soZ *= s;
+    } else if (ol < 0.02f) {
+        d.soX = d.soY = d.soZ = 0.0f;   // settle exactly, don't decay forever
+    }
+    EntityState placed = out;
+    placed.x = out.x + d.soX; placed.y = out.y + d.soY; placed.z = out.z + d.soZ;
+    engine::applyRaw(c, placed); // no-halt placement: does not reset the clip phase
+    bool mv = (out.cMoving != 0) || (out.cSpeed > MOVE_EPS);
+    engine::applyMotion(c, mv, out.cSpeed,
+                        out.cMotionX, out.cMotionY, out.cMotionZ);
+    engine::applyPhysMotion(c, out.cMotionX, out.cMotionY, out.cMotionZ,
+                            mv ? out.cSpeed : 0.0f);
+    // Nothing is outstanding for this body any more: no destination, no park,
+    // no cancelled order. Clearing them means a body that later leaves the
+    // kinematic regime (crawl, combat, the knob turned off mid-session) starts
+    // the walk drive from a clean slate instead of inheriting a stale lead point.
+    d.parked = false; d.haveDest = false;
+    d.walkHalted = false; d.walkStallF = 0;
+    if (!d.kinDrive) {
+        d.kinDrive = true;
+        char b[160]; _snprintf(b, sizeof(b) - 1,
+            "[kin] enter hand=%u,%u seg=%lums mid=%d",
+            out.hIndex, out.hSerial, d.interp.lastSegMs(), midTier ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+}
+
+bool Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
                            bool haveActual, float ax, float ay, float az,
-                           unsigned long now, bool isSquad) {
+                           unsigned long now, bool isSquad, bool poseOnly) {
     // Re-arm only when the host adopts a genuinely NEW non-NONE rest pose (stood up
     // then sat somewhere else). Crucially we IGNORE transient host->NONE frames: the
     // host capture intermittently reads currentAction==NONE for an otherwise-seated
@@ -2340,8 +2653,13 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
         // it (manual test 2026-07-17). The wake-and-move desync is handled by the
         // bed fast-exit in applyTargets (Fix A), so no re-sleep guard is needed
         // here - the driven copy follows the host the instant it moves.
-        return;
+        return true; // the engine owns this transform now
     }
+    // No pose held. The kinematic caller places the body itself, so everything
+    // below - the goal clear, the endAction, the halt-and-teleport park and the
+    // per-frame motion zeroing - is not just redundant for it but actively
+    // fights the placement (park() halts, and halt() resets the clip phase).
+    if (poseOnly) return false;
     // Fallback (no task / fixture missing / drifted): quiet the AI and hold the
     // host transform. Settle once (clean halt+teleport), then only re-place on
     // drift WITHOUT halting (halting every frame freezes the idle clip on frame 0).
@@ -2387,6 +2705,7 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
         }
     }
     engine::applyMotion(c, false, 0.0f, 0.0f, 0.0f, 0.0f);
+    return false;
 }
 
 

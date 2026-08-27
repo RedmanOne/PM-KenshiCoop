@@ -20,7 +20,7 @@ float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 } // namespace
 
 InterpConfig::InterpConfig()
-    : minDelayMs(50), maxDelayMs(200), maxExtrapMs(250),
+    : minDelayMs(50), maxDelayMs(200), maxExtrapMs(250), maxExtrapCapMs(900),
       snapDistSq(50.0f * 50.0f), staleMs(2000),
       cadenceDelayK(2.0f), maxCadenceDelayMs(1200) {}
 
@@ -148,14 +148,26 @@ bool EntityInterp::latest(EntityState* out, float* vx, float* vy, float* vz) con
     out->heading = newest.heading;
     if (vx || vy || vz) {
         float ex = 0.0f, ey = 0.0f, ez = 0.0f;
-        if (count_ >= 2) {
-            const Snap& prev = at(count_ - 2);
-            float dt = (float)(newest.t - prev.t);
-            if (dt > 0.0f) {
-                ex = (newest.x - prev.x) * 1000.0f / dt; // units per second
-                ey = (newest.y - prev.y) * 1000.0f / dt;
-                ez = (newest.z - prev.z) * 1000.0f / dt;
-            }
+        // Require a minimum baseline before trusting the derivative: two
+        // samples only a couple ms apart (near/mid-band overlap, a retransmit)
+        // divide a small, ordinary position delta by a near-zero dt and produce
+        // a spurious triple-digit u/s spike (measured live: 117-148 u/s off an
+        // NPC that never moved anywhere near that fast). That bogus velocity
+        // feeds the combat-drift srcVel gate and the walk-drive lead point, so
+        // one noisy sample pair could fire an unwarranted teleport-snap. Walk
+        // back through the ring for the nearest sample at least MIN_VEL_DT_MS
+        // older than the newest; on the healthy 20 Hz near band (50 ms spacing)
+        // the immediate previous sample already clears this, so behavior is
+        // unchanged there.
+        const unsigned long MIN_VEL_DT_MS = 40;
+        for (int i = count_ - 2; i >= 0; --i) {
+            const Snap& prev = at(i);
+            unsigned long dt = newest.t - prev.t;
+            if (dt < MIN_VEL_DT_MS) continue;
+            ex = (newest.x - prev.x) * 1000.0f / (float)dt;
+            ey = (newest.y - prev.y) * 1000.0f / (float)dt;
+            ez = (newest.z - prev.z) * 1000.0f / (float)dt;
+            break;
         }
         if (vx) *vx = ex;
         if (vy) *vy = ey;
@@ -211,7 +223,23 @@ bool EntityInterp::sample(unsigned long nowMs, const InterpConfig& cfg, EntitySt
     if (renderTime >= newest.t) {
         const Snap& prev = at(count_ - 2);
         unsigned long ahead = renderTime - newest.t;
-        if (ahead > cfg.maxExtrapMs) ahead = cfg.maxExtrapMs;
+        // The dead-reckoning budget has to cover the stream's OWN cadence, or a
+        // sparsely-sampled body glides for maxExtrapMs and then stands still for
+        // the rest of the interval - which is precisely how a 2 Hz body renders
+        // as "jump, wait, jump" (user report 2026-08-17: "they teleport each sync
+        // step instead of moving... doesn't move between teleports, just
+        // remaining at place waiting till next teleport"). The flat 250 ms was
+        // sized for the 20 Hz near band, where it is one lost batch of cover; on
+        // a 500 ms segment it covers half the gap and freezes the other half.
+        // Allow one and a half of the newest segment instead, so the body keeps
+        // moving right up to the sample that supersedes it, still bounded so a
+        // genuinely abandoned stream cannot fly off along a stale velocity.
+        unsigned long budget = cfg.maxExtrapMs;
+        unsigned long segMs  = newest.t - prev.t;
+        unsigned long segCap = segMs + segMs / 2;
+        if (segCap > budget) budget = segCap;
+        if (budget > cfg.maxExtrapCapMs) budget = cfg.maxExtrapCapMs;
+        if (ahead > budget) ahead = budget;
         float seg = (float)(newest.t - prev.t);
         lastMode_ = SM_EXTRAP;
         float sdx = newest.x - prev.x, sdy = newest.y - prev.y, sdz = newest.z - prev.z;

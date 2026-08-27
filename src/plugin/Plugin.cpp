@@ -2378,6 +2378,24 @@ void installEngineDetours() {
     if (!g_cfg.isHost && g_cfg.gateAuthority)
         coopLog("[trust] divergence-gated authority ON (default; KENSHICOOP_GATE_AUTHORITY=0 disables)");
 
+    // Kinematic world-NPC drive (BOTH sides, DEFAULT ON). Not join-only like the
+    // trust gate above: under presence authority the HOST drives world NPCs the
+    // join authors too, and they deserve the same treatment. It is scoped to
+    // non-squad bodies inside the drive itself, so wiring it on the host cannot
+    // touch how the host renders the join's player characters.
+    g_repl.setNpcKinematic(g_cfg.npcKinematic);
+    if (!g_cfg.npcKinematic)
+        coopLog("[kin] KENSHICOOP_NPC_KINEMATIC=0: world NPCs use the legacy walk drive");
+
+    // Distance-graded send ladder. Wired on BOTH sides for the same reason as
+    // the kinematic drive: whoever authors a region streams it, and under
+    // presence authority that is not always the host. The receiver half (not
+    // releasing a stationary far body back to local AI) reads the same flag, so
+    // the two must agree - which they do, since both come from this one config.
+    g_repl.setLadderStream(g_cfg.ladderStream);
+    if (!g_cfg.ladderStream)
+        coopLog("[pub] KENSHICOOP_LADDER_STREAM=0: far NPCs use the legacy ~2 Hz round-robin");
+
     // Damage guard (BOTH sides, DEFAULT ON): locally-simulated melee hits on
     // driven bodies are suppressed (HIT_MISSED) so cosmetic fights cannot diverge
     // the local-only medical model. The guard set is "every body this client

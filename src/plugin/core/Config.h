@@ -203,6 +203,26 @@ struct Config {
     // the drive the same tick. Doctrine 18 in INTENT_REPLICATION.md.
     bool          gateAuthority;
 
+    // Kinematic world-NPC drive (KENSHICOOP_NPC_KINEMATIC != "0", DEFAULT ON):
+    // drive a peer-authored world NPC by PLACING it on the interpolated sample
+    // every frame + mirroring the streamed locomotion, instead of ordering the
+    // local engine to walk it to a lead point and correcting with parks and
+    // teleports. Set to "0" to fall back to the historical walk drive for an
+    // A/B. Only the plain locomotion/rest regime is affected - combat, carry,
+    // furniture, down/KO, crawl and assassinate keep reproducing the CAUSE, and
+    // squad-class bodies keep the (validated) walk drive. See
+    // Replicator::setNpcKinematic for the session measurement behind it.
+    bool          npcKinematic;
+
+    // Distance-graded send ladder (KENSHICOOP_LADDER_STREAM != "0", DEFAULT ON,
+    // host side): every authored body inside censusRadius gets a send interval
+    // derived from its distance to the peer's anchors, published when due,
+    // most-overdue first - replacing the ~2 Hz round-robin that gave one cadence
+    // to everything past the stream bubble, skipped stationary bodies, and left
+    // anything past the 48-entry mid list unstreamed entirely. Set to "0" for an
+    // A/B against the round-robin.
+    bool          ladderStream;
+
     // Damage guard, BOTH sides (KENSHICOOP_DAMAGE_GUARD != "0"; DEFAULT ON):
     // detour Character::hitByMeleeAttack so locally-simulated (cosmetic) fights
     // apply no damage to DRIVEN bodies - Kenshi's medical model is local-only,

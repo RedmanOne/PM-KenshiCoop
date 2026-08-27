@@ -410,7 +410,72 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         }
         midFastPromoted_ = nFast;
     }
-    if (streamNpcs_ && !midBand_.empty() && n < MAX_PUBLISH) {
+    // ---- Distance-graded rate ladder (2026-08-17) ---------------------------
+    // Replaces the ~2 Hz round-robin below it. The round-robin gave every
+    // mid-band body the SAME cadence regardless of how far away it was, sliced
+    // by a cursor over a list the 1 Hz census rebuilt and re-sorted underneath
+    // it - so a given body's actual sample spacing was not 500 ms, it was
+    // anywhere from 50 ms (two slices in a row) to seconds (reshuffled past),
+    // and it skipped stationary bodies entirely. The receiver cannot smooth
+    // what it does not receive: measured on the join, one sample in four on
+    // that tier was dead-reckoned rather than interpolated, and the user's
+    // report is the visible form of it ("teleport each sync step... doesn't
+    // move between teleports").
+    //
+    // The ladder gives each body its OWN due time from its distance to the
+    // peer's anchors, and publishes whatever is due, most-overdue first. Three
+    // properties matter and none of them held before:
+    //   * cadence DEGRADES with distance instead of cutting out - which is the
+    //     thing that was actually asked for;
+    //   * a body's spacing is its interval, not a lottery over a rotating
+    //     cursor, so the receiver's buffer can size its render delay from a
+    //     cadence that means something;
+    //   * nothing inside the census radius is ever unstreamed, so the 1 Hz
+    //     census park (which corrects by TELEPORT, and was measured firing at
+    //     463-2428 u of divergence) stops being load-bearing.
+    // Stationary bodies stay on the ladder too. Skipping them is what let a
+    // far body's two copies drift apart while nobody was correcting it, and at
+    // the far intervals a still body costs almost nothing to confirm.
+    if (streamNpcs_ && ladderStream_ && !midBand_.empty() && n < MAX_PUBLISH) {
+        const unsigned int nearEnd = n;
+        unsigned long nowLad = nowMs();
+        // Overdue-first, so a starved body outranks a merely-due one and the
+        // MAX_PUBLISH cap sheds the least urgent work rather than a fixed tail.
+        std::vector<std::pair<long, unsigned int> > due; // (-overdue, midBand idx)
+        due.reserve(midBand_.size());
+        for (unsigned int i = 0; i < midBand_.size(); ++i) {
+            const Key& mk = midBand_[i].k;
+            bool dup = false;
+            for (unsigned int j = 0; j < nearEnd && !dup; ++j)
+                dup = buf[j].hIndex == mk.i && buf[j].hSerial == mk.s;
+            if (dup) continue; // already going out at the near-band rate
+            unsigned long want = ladderIntervalMs(midBand_[i].dist);
+            std::map<Key, PubStamp>::iterator ps = pubStamp_.find(mk);
+            unsigned long last = (ps != pubStamp_.end()) ? ps->second.lastMs : 0;
+            long overdue = (last == 0)
+                ? 0x7FFFFFFF                     // never sent: maximum urgency
+                : (long)(nowLad - last) - (long)want;
+            if (overdue < 0) continue;
+            due.push_back(std::make_pair(-overdue, i));
+        }
+        std::sort(due.begin(), due.end());
+        pubDueN_ = (unsigned int)due.size();
+        for (unsigned int q = 0; q < due.size() && n < MAX_PUBLISH; ++q) {
+            unsigned int i = due[q].second;
+            const Key mk = midBand_[i].k;
+            if (!engine::captureNpcByHand(gw, mk.i, mk.s, mk.t, mk.c, mk.cs, &buf[n]))
+                continue;
+            // Same 1 Hz staleness re-check the old passes did: midBand_ was
+            // filtered by weAuthor when the census last rebuilt it, and across a
+            // claim handover that list keeps naming bodies that are no longer
+            // ours. The row is already in hand, so the check is free.
+            if (cellAuth_ && !weAuthor(gw, ownerId, buf[n].x, buf[n].z)) continue;
+            ++n;
+        }
+        if (n >= MAX_PUBLISH) ++pubCapHits_;
+        pubLadderN_ = n - nearEnd;
+    }
+    if (streamNpcs_ && !ladderStream_ && !midBand_.empty() && n < MAX_PUBLISH) {
         const unsigned int nearEnd = n;
         unsigned int sz = (unsigned int)midBand_.size();
         unsigned int quota = (sz + 9) / 10;
@@ -452,6 +517,69 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
                 ++n;
                 ++added;
             }
+        }
+    }
+    // ---- Publish-composition telemetry --------------------------------------
+    // What actually went on the wire, and - the part that was missing entirely -
+    // whether any body's spacing exceeded the cadence it was supposed to get.
+    // Every gate above can silently drop a body, and until now the only trace of
+    // that was a starved interp buffer on the RECEIVER, which looks identical to
+    // packet loss and to the tiering working as intended. gap>2x is the signal:
+    // a near-band body is due every frame, so anything past ~100 ms means it
+    // left the snapshot; a ladder body is judged against its own interval.
+    {
+        unsigned long nowPubT = nowMs();
+        unsigned int nearCount = 0;
+        for (unsigned int i = 0; i < n; ++i) {
+            Key pk = keyOf(buf[i]);
+            std::map<Key, PubStamp>::iterator ps = pubStamp_.find(pk);
+            unsigned long want = 50; // near band: every snapshot
+            float dist = 0.0f;
+            for (unsigned int m = 0; m < midBand_.size(); ++m) {
+                if (midBand_[m].k.i == pk.i && midBand_[m].k.s == pk.s) {
+                    dist = midBand_[m].dist;
+                    want = ladderStream_ ? ladderIntervalMs(dist) : 500;
+                    break;
+                }
+            }
+            if (want <= 50) ++nearCount;
+            if (ps != pubStamp_.end() && ps->second.lastMs != 0) {
+                unsigned long gap = nowPubT - ps->second.lastMs;
+                if (gap > want * 2) {
+                    ++pubGapN_;
+                    if (gap > pubWorstGap_) {
+                        pubWorstGap_ = gap; pubWorstKey_ = pk; pubWorstDist_ = dist;
+                    }
+                }
+            }
+            PubStamp& st = pubStamp_[pk];
+            st.lastMs = nowPubT; st.dueMs = want; st.dist = dist;
+        }
+        pubNearN_ = nearCount;
+        // Prune hands we have stopped publishing (left interest, despawned) on
+        // the same horizon hostBody_ uses, so this cannot leak a session's
+        // worth of passers-by.
+        for (std::map<Key, PubStamp>::iterator pit = pubStamp_.begin();
+             pit != pubStamp_.end(); ) {
+            if (nowPubT - pit->second.lastMs > 60000) pubStamp_.erase(pit++);
+            else ++pit;
+        }
+        if (pubLogMs_ == 0 || (nowPubT - pubLogMs_) >= 5000) {
+            pubLogMs_ = nowPubT;
+            char b[240]; _snprintf(b, sizeof(b) - 1,
+                "[pub] n=%u near=%u ladder=%u due=%u capHits=%u ladderOn=%d "
+                "gaps=%lu worst=%lums hand=%u,%u dist=%.0f mid=%u unwatched=%u",
+                n, pubNearN_, pubLadderN_, pubDueN_, pubCapHits_,
+                ladderStream_ ? 1 : 0, pubGapN_, pubWorstGap_,
+                pubWorstKey_.i, pubWorstKey_.s, pubWorstDist_,
+                (unsigned)midBand_.size(), midUnwatched_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            // Clear the worst-offender identity along with its measurements, or
+            // a quiet window reports a stale hand next to a zeroed distance.
+            pubGapN_ = 0; pubWorstGap_ = 0; pubWorstDist_ = 0.0f;
+            pubWorstKey_.t = pubWorstKey_.c = pubWorstKey_.cs = 0;
+            pubWorstKey_.i = pubWorstKey_.s = 0;
+            pubCapHits_ = 0;
         }
     }
     net.setOwnedEntities(ownerId, buf, n);
@@ -1051,20 +1179,53 @@ void Replicator::publishNpcCensus(GameWorld* gw, NetLink& net, u32 ownerId) {
         float peerAnch[12];
         unsigned int nPeerAnch = peerAnchors(gw, peerAnch);
         midBand_.clear();
+        unsigned int nUnwatched = 0;
         for (unsigned int i = 0; i < n; ++i) {
+            // Distance to whoever is WATCHING - the peer we are streaming to -
+            // not the minimum over every anchor. The old min included OUR own
+            // squad and camera, so a body standing next to the host got a fast
+            // rung on the join's behalf while the join was a map away, and the
+            // rung a body got said nothing about how visible it was to the only
+            // client that receives it. Fall back to the full anchor set when the
+            // peer has published no camera hint yet (loading, alt-tabbed), which
+            // is the same fail-open the attention gate uses.
+            const float* rungAnch = (nPeerAnch > 0) ? peerAnch : anchors;
+            unsigned int nRung    = (nPeerAnch > 0) ? nPeerAnch : nAnchor;
             float best = -1.0f;
-            for (unsigned int s = 0; s < nAnchor; ++s) {
+            for (unsigned int s = 0; s < nRung; ++s) {
                 float d = dist3(states[i].x, states[i].y, states[i].z,
-                                anchors[s * 3 + 0], anchors[s * 3 + 1],
-                                anchors[s * 3 + 2]);
+                                rungAnch[s * 3 + 0], rungAnch[s * 3 + 1],
+                                rungAnch[s * 3 + 2]);
                 if (best < 0.0f || d < best) best = d;
             }
-            if (best < 0.0f || best <= MID_NEAR_EDGE) continue; // near tier
+            if (best < 0.0f) continue;
+            if (best <= MID_NEAR_EDGE) continue; // near tier (captureNpcs owns it)
             // Same ownership rule as the near band: we drive what we author.
             if (cellAuth_ && !weAuthor(gw, ownerId, states[i].x, states[i].z)) continue;
-            if (cellAuth_ && nPeerAnch > 0 &&
-                !observedByPeer(keyOf(states[i]), peerAnch, nPeerAnch,
-                                states[i].x, states[i].y, states[i].z)) continue;
+            // Attention DEMOTES, it no longer EXCLUDES. This gate used to drop
+            // the body from the band outright, and that is the hole the ladder
+            // kept falling through: measured 2026-08-17 with enum=52, notmine=0
+            // and ~14 in the near band, the mid band should have held ~38 and
+            // held 17-27 - so 11-21 bodies per tick were being streamed to
+            // nobody. Unstreamed means two locally-simulated copies drifting
+            // apart with only the 1 Hz census park to reconcile them, by
+            // teleport, which is the "constant teleporting movement" on exactly
+            // the bodies wearing the MID tag. It also produced a 21-SECOND
+            // publish gap on a body 970 u out, against its 200 ms rung.
+            // Not watching the region is still worth something - it is just
+            // worth a slower rung, not silence. The body stays covered, its two
+            // copies stay together, and the cost is a few hundred bytes a second.
+            bool watched = true;
+            if (cellAuth_ && nPeerAnch > 0)
+                watched = observedByPeer(keyOf(states[i]), peerAnch, nPeerAnch,
+                                         states[i].x, states[i].y, states[i].z);
+            if (!watched) {
+                ++nUnwatched;
+                // Push it past the last rung so ladderIntervalMs gives it the
+                // slowest cadence, without disturbing the real distance ordering
+                // of everything the peer IS looking at.
+                if (best < LADDER_UNWATCHED_DIST) best = LADDER_UNWATCHED_DIST;
+            }
             MidBandEntry e;
             e.k.t  = states[i].hType;
             e.k.c  = states[i].hContainer;
@@ -1081,9 +1242,19 @@ void Replicator::publishNpcCensus(GameWorld* gw, NetLink& net, u32 ownerId) {
         // smoothness gate on bodies that WERE tracking). The nearest ~48
         // cover everything the join player can meaningfully watch; the far
         // remainder keeps the census-park fallback it always had.
-        const unsigned int MID_BAND_MAX = 48;
+        // The ladder changes what this budget BUYS. Under the round-robin every
+        // entry cost the same ~2 Hz slot, so 48 was the point where driving them
+        // all measurably starved Kenshi's own character-update budget on the
+        // peer. On the ladder an entry's cost falls with its distance - the far
+        // half of the list is 2 Hz, the near half 5-10 Hz - so the same spend
+        // covers far more bodies, and every body it covers is one the 1 Hz
+        // census park no longer has to teleport. Anything past the cap is still
+        // unstreamed, which is exactly the "teleportation goes wild at high
+        // distances" case, so the cap is where that symptom lives.
+        const unsigned int MID_BAND_MAX = ladderStream_ ? 128 : 48;
         if (midBand_.size() > MID_BAND_MAX) midBand_.resize(MID_BAND_MAX);
         if (midCursor_ >= midBand_.size()) midCursor_ = 0;
+        midUnwatched_ = nUnwatched;
     }
 
     if (auditRows_) notePlatoons(gw, states, n, "host");

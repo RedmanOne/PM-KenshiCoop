@@ -137,6 +137,50 @@ public:
     // cheap monitor only; re-engaged instantly on divergence or drift (doctrine 18).
     void setGateAuthority(bool v) { gateAuthority_ = v; }
 
+    // Kinematic world-NPC drive (KENSHICOOP_NPC_KINEMATIC, default ON).
+    //
+    // The historical drive asked the JOIN's engine to WALK a remote NPC:
+    // walkTo() a lead point projected along the source velocity, re-issued
+    // whenever that point moved a metre, halted whenever the instantaneous
+    // source velocity dipped, parked (halt + teleport) whenever the debounced
+    // classifier flipped to rest, and hard-snapped whenever the body fell far
+    // enough behind. Every one of those is a path restart or a clip reset, and
+    // they fire at stream cadence. Measured over one 282 s manual session
+    // (2026-08-17, both clients on one machine, transmit clock proven steady at
+    // 49-51 ms): 10103 walk re-issues (36/s), 1553 walk<->rest flips (5.5/s),
+    // ~100 hard teleports - and an ordinary 'Drunken Bar Thug' walking at
+    // 15 u/s sat 96 u (six seconds) behind its host copy before being snapped.
+    // The body never sustains motion long enough to catch up, so it falls
+    // behind, teleports, and repeats: the reported per-tick stutter.
+    //
+    // Kinematic mode drops the whole walk/park/snap apparatus for world NPCs
+    // and instead PLACES the body on the interpolated sample every frame,
+    // mirroring the streamed locomotion so the animation controller still picks
+    // the right clip. This is not a new idea here - it is exactly what the
+    // protocol-53 crawl drive already does, and that path measures 0.25 u
+    // tracking error at zeroFrac 0.008 where the walk drive measures tens of
+    // units. It also degrades gracefully with cadence: a body sampled at 2 Hz
+    // still glides between its samples instead of being ordered and snapped.
+    //
+    // Scope: ONLY the plain locomotion/rest regime. Combat, carry, furniture,
+    // down/KO, crawl and assassinate all `continue` out before this point and
+    // keep reproducing the CAUSE, which is what makes them animate correctly.
+    // Squad-class bodies (the peer's player characters) keep the walk drive:
+    // they are inert when uncontrolled, so the engine genuinely obeys a move
+    // order for them, and that path is validated.
+    void setNpcKinematic(bool v) { npcKinematic_ = v; }
+
+    // Distance-graded send ladder (KENSHICOOP_LADDER_STREAM, default ON, HOST
+    // side). Every authored body inside censusRadius_ gets a send interval from
+    // its distance to the peer's anchors and is published when it comes due,
+    // most-overdue first - instead of the old scheme, where anything past the
+    // ~260 u bubble shared one ~2 Hz round-robin cursor, stationary bodies were
+    // skipped outright, and anything the 48-entry mid list did not hold was not
+    // streamed at all (its two copies then diverged under local AI until the
+    // 1 Hz census teleported one onto the other: measured at 463-2428 u).
+    // See ladderIntervalMs for the steps. "0" restores the round-robin.
+    void setLadderStream(bool v) { ladderStream_ = v; }
+
     // Carried-body sync (protocol 18, default ON): reliable pickup/drop edges +
     // self-healing carried state for player-squad members, executed engine-
     // native on each machine's local pair. KENSHICOOP_CARRY_SYNC=0 disables.
@@ -983,6 +1027,41 @@ private:
         // accrued under sparse mid coverage - classed to the mid ledger
         // (like young-ring coverage snaps), not steady-state near tracking.
         unsigned long midSeenMs;
+        // Last tick's tier verdict, for the per-tier interp accounting in
+        // logDriveTelemetry. The aggregate delay/jit in the [interp] line are a
+        // MAX over every live buffer, so one ~2 Hz mid body pins them high and
+        // the near tier's health is invisible behind it (2026-08-17: the
+        // transmit clock was proven steady at 49-51 ms while the line still
+        // read jit=200). The tier is only known well after sample() has been
+        // classified, and half the bodies `continue` out before then, so the
+        // previous tick's verdict is what every sample can actually be charged
+        // to - off by one tick at a tier handover, which is noise at this
+        // cadence.
+        bool         wasMid;
+        // Kinematic-drive edge log (one line per body per regime entry).
+        bool         kinDrive;
+        // ---- Position error smoothing (2026-08-17) --------------------------
+        // Every position correction in this codebase used to be a hard place
+        // (engine::applyRaw / engine::park): the body is at A, the truth is at
+        // B, so it is at B on the next frame. There was no smoothing layer
+        // anywhere, which is why corrections of even a few units read as
+        // teleports - the user reported ~10 u jumps on bodies that were
+        // otherwise tracking fine (DRV tag, in combat).
+        //
+        // so_ is a RENDER OFFSET carried on top of the true position. When the
+        // target stream jumps further than the source could physically have
+        // moved since the last frame, the jump is absorbed into this offset
+        // instead of into the body - the rendered position stays exactly where
+        // it was - and the offset then decays to zero over KIN_SMOOTH_TAU_MS, so
+        // the body GLIDES onto the truth. Because it is an offset rather than a
+        // rate-limited chase, a body following a moving target has no
+        // steady-state lag: the offset shrinks while the target advances.
+        float        soX, soY, soZ;
+        // Previous frame's TARGET (not the previous rendered position), which is
+        // what a discontinuity is measured against.
+        float        ptX, ptY, ptZ;
+        bool         havePt;
+        unsigned long smoothMs;      // last smoothing tick (for the decay dt)
         Driven() : fresh(false), haveActual(false), lx(0), ly(0), lz(0), parked(false),
                    haveDest(false), dx(0), dy(0), dz(0), walkHalted(false), walkStallF(0),
                    suppressed(false), lastSeenMs(0),
@@ -1004,7 +1083,11 @@ private:
                    restEnterMs(0), walkBranchPrev(false),
                    zeroF(0), activeF(0), advMs(0),
                    oracleActivePrev(false), oracleOnsetMs(0),
-                   prevInterpMode(-1), midSeenMs(0) {
+                   prevInterpMode(-1), midSeenMs(0),
+                   wasMid(false), kinDrive(false),
+                   soX(0.0f), soY(0.0f), soZ(0.0f),
+                   ptX(0.0f), ptY(0.0f), ptZ(0.0f),
+                   havePt(false), smoothMs(0) {
             chainOwner[0] = chainOwner[1] = chainOwner[2] = chainOwner[3] = chainOwner[4] = 0;
         }
     };
@@ -1016,9 +1099,66 @@ private:
     // isSquad: player-squad members are NEVER town-AI-detached (the detach
     // re-containers the body OUT of its squad tab - a new hand - which breaks
     // every hand-keyed protocol on a squad member; observed on bed_pose).
-    void applyRest(Character* c, Driven& d, const EntityState& out,
+    // Returns TRUE when a fixture pose is currently held, i.e. the engine owns
+    // this body's transform and no positional drive may touch it.
+    // poseOnly (kinematic NPC drive, 2026-08-17): stop after the pose decision
+    // and skip the park fallback (clearGoals + endAction + halt-teleport). The
+    // kinematic path places the body from the interp sample every tick, so the
+    // fallback's park is not just redundant, it is harmful - park() halts, and
+    // halt() resets the clip phase. Callers passing false get the historical
+    // behaviour byte for byte.
+    bool applyRest(Character* c, Driven& d, const EntityState& out,
                    bool haveActual, float ax, float ay, float az, unsigned long now,
-                   bool isSquad);
+                   bool isSquad, bool poseOnly = false);
+
+    // The kinematic world-NPC regime (setNpcKinematic): hold a reproducible
+    // fixture pose if there is one, else place the body on the interpolated
+    // sample and mirror the streamed locomotion. Called as the first arm of the
+    // drive chain so the smoothness/anim/march oracles still score these bodies.
+    void driveKinematic(Character* c, Driven& d, const EntityState& out,
+                        bool haveActual, float ax, float ay, float az,
+                        unsigned long now, bool genuinelyMoving, bool midTier,
+                        bool isSquad);
+
+    // Close a position error by GLIDING the body onto the target over a few
+    // frames instead of placing it there in one. For bodies whose position the
+    // LOCAL engine owns (a combatant doing its own footwork, an NPC carrying
+    // someone): it does not issue orders, halt, or touch the animation - it
+    // only translates, so the body keeps fighting/walking exactly as it was
+    // while the error bleeds off underneath it.
+    //   dtMs     - time since this body's last correction tick
+    //   tauMs    - time constant; ~63% of the error is closed in one tau
+    //   maxGlide - above this the gap is a genuine warp (fast travel, a zone
+    //              change, a mint landing somewhere else) and gliding it would
+    //              take seconds and look worse than the jump. Returns FALSE so
+    //              the caller places the body outright, which stays correct.
+    //   minRate  - floor on closing speed (u/s) so a small residual error still
+    //              converges instead of decaying asymptotically forever.
+    // Heading comes from the target, exactly as the hard place it replaces did.
+    bool smoothCorrect(Character* c, const EntityState& tgt,
+                       float ax, float ay, float az, unsigned long dtMs,
+                       float tauMs, float maxGlide, float minRate);
+
+    // How long a correction of this size should take. The first cut used a flat
+    // ~200 ms everywhere, which closed visibly fast and made the apparent speed
+    // of a correction scale with its size - the biggest errors moved the body
+    // fastest, which is the worst way round. This is 2.5x slower at the floor
+    // and grows with the error, so a large correction takes longer rather than
+    // moving quicker, and the glide stays under the eye's threshold either way.
+    //   5 u -> ~510 ms, 20 u -> ~690 ms, 60 u -> ~1.2 s, capped at 1.6 s.
+    static float smoothTauMs(float errLen) {
+        float tau = 450.0f + errLen * 12.0f;
+        if (tau > 1600.0f) tau = 1600.0f;
+        return tau;
+    }
+    // Corrections smaller than this are not worth making: the body is already
+    // within about three walking paces of the truth, and writing a sub-pace
+    // adjustment every frame is just jitter with no visual benefit. Applies to
+    // CORRECTIONS only - never to the kinematic drive's continuous placement,
+    // where a dead zone would hold the body still until the target had pulled
+    // three paces ahead and then move it in one step, recreating exactly the
+    // per-sample teleporting this whole pass exists to remove.
+    static const int SMOOTH_DEADZONE_U = 3;
 
     // Drive-tick epilogue (Phase 7 Workstream C): the self-contained post-loop
     // passes split out of applyTargets. Each reads/writes only Replicator members
@@ -1207,6 +1347,61 @@ private:
     unsigned int              midFastPromoted_; // mid bodies streamed at the full
                                            // near-band rate last tick because they
                                            // were RUNNING (see the promotion pass)
+
+    // ---- Publish-composition telemetry (2026-08-17) -------------------------
+    // The host had none. Every gate in publishOwned can silently drop a body
+    // from the snapshot, and the only visible consequence was on the RECEIVER,
+    // as an interp buffer that starved - which is indistinguishable from packet
+    // loss, from a slow frame, or from the tiering working as designed. So a
+    // whole investigation had to be run on inference. This records, per hand,
+    // when we last actually PUT the body on the wire, and rolls up the bodies
+    // whose gap exceeded the cadence they were supposed to get.
+    // Keyed by hand; pruned on the same horizon as the rest of the session maps.
+    struct PubStamp {
+        unsigned long lastMs;   // last publish of this hand
+        unsigned long dueMs;    // when the ladder next wants it (0 = near band)
+        float         dist;     // distance to the nearest peer anchor at that time
+    };
+    // The ladder itself: how often a body that far from the peer's nearest
+    // anchor should hit the wire. The near bubble (captureNpcs, ~200/260 u) is
+    // already every snapshot, so this only shapes what lies beyond it. The steps
+    // are deliberately coarse - the point is that cadence DEGRADES with distance
+    // rather than cutting off, not that any particular ring is optimal - and the
+    // far end is still 2 Hz, which is what the whole mid band used to get.
+    // Cost check against a real scene (52 census bodies, ~35 near): roughly
+    // 700 near rows/s + ~60 ladder rows/s at 79 B = under 60 KB/s.
+    static unsigned long ladderIntervalMs(float dist) {
+        // Finer and faster at the near end than the first cut, because that is
+        // where the eye is. The tier classifier calls a body MID at >250 ms
+        // spacing, so everything out to 900 u now lands under that line and
+        // renders (and labels) as a normal near-tier body; past it the rungs
+        // widen quickly, since a body that far away is a few pixels moving.
+        if (dist <= 400.0f)  return 66;    // ~15 Hz - indistinguishable from 20
+        if (dist <= 700.0f)  return 100;   // 10 Hz
+        if (dist <= 900.0f)  return 160;   // ~6 Hz, still under the MID threshold
+        if (dist <= 1400.0f) return 300;   // ~3 Hz
+        if (dist <= 2000.0f) return 500;   // 2 Hz
+        return 1000;                       // unwatched / far edge: 1 Hz, but never 0
+    }
+    // Where a body the peer is not looking at gets parked on the ladder. Past
+    // the last real rung, so it takes the slowest cadence - covered, but cheap.
+    static const int LADDER_UNWATCHED_DIST = 2200;
+    // KENSHICOOP_LADDER_STREAM=0 falls back to the historical ~2 Hz round-robin.
+    bool                      ladderStream_;
+    std::map<Key, PubStamp>   pubStamp_;
+    unsigned long             pubLogMs_;      // last [pub] rollup
+    unsigned long             pubGapN_;       // gaps beyond 2x the intended cadence
+    unsigned long             pubWorstGap_;   // ...and the worst one, in ms
+    Key                       pubWorstKey_;
+    float                     pubWorstDist_;
+    unsigned int              pubNearN_;      // last tick's composition
+    unsigned int              pubLadderN_;
+    unsigned int              pubDueN_;       // ladder entries that came due
+    unsigned int              pubCapHits_;    // ticks the MAX_PUBLISH cap bit
+    unsigned int              midUnwatched_;  // band members demoted to the slow
+                                              // rung because the peer is not
+                                              // looking at them (they used to be
+                                              // dropped from the band entirely)
     // v38 census position parking (pack-hidden investigation, 2026-07-11):
     // the host position per census row. A census-PRESENT NPC is exempt from
     // culling, but its two locally-simulated copies can wander arbitrarily
@@ -1819,6 +2014,19 @@ private:
     unsigned long interpClampOld_;
     unsigned long interpExtrap_;
     unsigned long interpSegSnap_;
+    // The same samples split by TIER (2026-08-17). The counters above are one
+    // pool, so an extrapFrac read off them cannot say whether the near 20 Hz
+    // band is healthy and the ~2 Hz mid rotation is starving, or the reverse -
+    // and those two want opposite fixes (receiver smoothing vs sender cadence).
+    // Charged to the body's PREVIOUS-tick tier verdict (Driven::wasMid).
+    unsigned long interpNearN_;     // samples classified near-tier this session
+    unsigned long interpNearStarve_;// ...of which EXTRAP or CLAMP_OLD
+    unsigned long interpMidN_;      // samples classified mid-tier
+    unsigned long interpMidStarve_;
+    // Longest sender-stamp gap seen on a near-tier body, in ms. A clean 20 Hz
+    // near band tops out around one lost batch (~100 ms); anything far above
+    // that is the near band itself dropping out of the snapshot, not jitter.
+    unsigned long interpNearMaxSeg_;
     unsigned long hardSnapSquad_;   // SNAP_DIST applyRaw on a moving squad body
     unsigned long hardSnapNpc_;     // SNAP_DIST applyRaw on a moving world NPC (near tier)
     unsigned long hardSnapMid_;     // same, MID-tier bodies (Phase 2): counted apart so
@@ -2754,6 +2962,20 @@ private:
     unsigned long        trustLogTick_;
     unsigned long        trustGrants_;   // trusted-mode entries this run
     unsigned long        trustRevokes_;  // trusted-mode exits (divergence/drift)
+
+    // Kinematic world-NPC drive (see setNpcKinematic).
+    bool                 npcKinematic_;
+    unsigned long        kinPlaced_;     // frames a body was placed from the interp sample
+    unsigned long        kinPosed_;      // frames a fixture pose owned the transform instead
+    // Position error smoothing. absorbed = target discontinuities taken into the
+    // render offset instead of onto the screen; glide/hardPlace = corrections the
+    // smoother closed over time vs gaps too big to glide (a real warp). A healthy
+    // session should show hardPlace near zero: every remaining one is a visible
+    // teleport, and now a countable, attributable one.
+    unsigned long        kinAbsorbed_;
+    unsigned long        smoothGlide_;
+    unsigned long        smoothHardPlace_;
+    unsigned long        smoothDead_;   // corrections skipped inside the dead zone
 };
 
 } // namespace coop
