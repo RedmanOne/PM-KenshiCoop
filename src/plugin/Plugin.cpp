@@ -2395,6 +2395,16 @@ void installEngineDetours() {
             // copies; publishCombatHits forwards it and the host wounds the real body.
             // The flag itself is role-derived: applyRoleFlags (below / panel Connect).
             g_dmgGuardInstalled = true;
+            // Assassination/KO report (protocol 59): MedicalSystem::knockout is the
+            // ONLY edge that says a guarded body was knocked OUT rather than merely
+            // wounded, so the guard needs it to forward the outcome. Installed
+            // unconditionally - a detour cannot be role-flipped after the fact, and
+            // knockout_hook is inert unless g_combatReport is set, which
+            // applyRoleFlags derives from the role exactly as it does reportCombat.
+            if (coop::engine::installKnockoutReportHook())
+                coopLog("[dmg] knockout detour installed; assassination report follows the role");
+            else
+                coopLog("[dmg] WARN knockout detour unavailable; assassination report OFF");
             coopLog(g_cfg.isHost
                 ? "[dmg] hitByMeleeAttack detour installed; damage guard ON (host, driven peer-squad bodies)"
                 : "[dmg] hitByMeleeAttack detour installed; damage guard ON + combat-hit report ON (join)");

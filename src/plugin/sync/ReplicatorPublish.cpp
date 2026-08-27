@@ -32,6 +32,50 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
     // one-directional behaviour is preserved exactly. ownHands_ records owned keys
     // for the drive-exclusion guard.
     unsigned int nSquad = engine::captureSquad(gw, /*leaderOnly*/ false, raw, MAX_PUBLISH);
+    // DIAGNOSTIC (2026-08-16, assassinate sync): KENSHICOOP_DEBUG_MARKERS=1 pops a
+    // floating label over any squad member with a non-idle rawTask, showing the RAW
+    // Tasker::key number regardless of whether isReproduciblePose streams it as
+    // 'task'. This is the ground truth for "what does the engine actually report
+    // while a stealth KO/kill is in progress" - if the label never reads ASSASSINATE
+    // during a silent takedown, the task never touches Character::currentAction at
+    // all and the whole pose-sync approach for it needs to be replaced (e.g. hook
+    // the assassinate start the same way installKnockoutReportHook hooks its end).
+    {
+        static int dbgTask = -1;
+        if (dbgTask < 0) {
+            const char* e = getenv("KENSHICOOP_DEBUG_MARKERS");
+            dbgTask = (e && e[0] == '1') ? 1 : 0;
+        }
+        if (dbgTask == 1) {
+            for (unsigned int i = 0; i < nSquad; ++i) {
+                if (raw[i].rawTask == TASK_NONE) continue;
+                Character* tc = engine::resolveCharByHand(raw[i].hIndex, raw[i].hSerial,
+                    raw[i].hType, raw[i].hContainer, raw[i].hContainerSerial);
+                if (!tc) continue;
+                bool assassinate = engine::isAssassinateTask((int)raw[i].rawTask);
+                bool lockpick    = engine::isDoorLockTask((int)raw[i].rawTask);
+                char tag[24];
+                _snprintf(tag, sizeof(tag) - 1, "%s T%u",
+                          assassinate ? "ASSASSINATE" : (lockpick ? "LOCKPICK" : "TASK"),
+                          (unsigned)raw[i].rawTask);
+                tag[sizeof(tag) - 1] = '\0';
+                debugMark(tc, (assassinate || lockpick) ? 0 : 3, tag);
+                // Log too (once per key, via the existing logTaskKeyOnce machinery
+                // already firing unconditionally in captureOne) so this is
+                // verifiable from the log file even if the GUI marker never
+                // renders for an unrelated reason.
+                if (assassinate) {
+                    static std::set<unsigned int> loggedHands;
+                    if (loggedHands.insert(raw[i].hIndex * 100003u + raw[i].hSerial).second) {
+                        char b[128]; _snprintf(b, sizeof(b) - 1,
+                            "[assassinate] CAPTURE hand=%u,%u rawTask=%u",
+                            raw[i].hIndex, raw[i].hSerial, (unsigned)raw[i].rawTask);
+                        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                    }
+                }
+            }
+        }
+    }
     std::vector<std::pair<u32, u32> > ctnrs; // distinct squad-tab containers, sorted
     ctnrs.reserve(nSquad);
     for (unsigned int i = 0; i < nSquad; ++i)
@@ -92,6 +136,35 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         buf[n++] = raw[i];
         ownHands_.insert(hk);
     }
+    // DIAGNOSTIC (2026-08-17, lockpick sync): log the EDGES of every door-lock
+    // episode an OWNED character starts and finishes - unconditionally, because a
+    // player watches this one happen (pitfall 9), and over the owned subset rather
+    // than the whole roster so a `CAPTURE` line only ever appears on the machine
+    // that authored the pick (the peer's copy reports the same task once the pose
+    // lands, and logging that here would read as a second author).
+    // Both numbers are on the line: `raw` is what the engine reports for the body,
+    // `task` is what we actually stream. raw=<a door task> with task=65535 means
+    // the capture allowlist did not fire; both set means the send side is doing its
+    // job and a missing animation is on the receiver (look for the matching
+    // `[lockpick] APPLY` in the OTHER client's log). Edge-triggered off a set of the
+    // hands currently working a lock, so one pick costs two lines, not one a tick.
+    {
+        static std::set<unsigned int> picking; // hand mix -> episode in progress
+        for (unsigned int i = 0; i < n; ++i) {
+            bool doorTask = buf[i].rawTask != TASK_NONE &&
+                            engine::isDoorLockTask((int)buf[i].rawTask);
+            unsigned int pk = buf[i].hIndex * 100003u + buf[i].hSerial;
+            bool wasPicking = picking.find(pk) != picking.end();
+            if (doorTask == wasPicking) continue; // no edge
+            if (doorTask) picking.insert(pk); else picking.erase(pk);
+            char b[176]; _snprintf(b, sizeof(b) - 1,
+                "[lockpick] CAPTURE %s hand=%u,%u raw=%u task=%u door=%u,%u",
+                doorTask ? "begin" : "end", buf[i].hIndex, buf[i].hSerial,
+                (unsigned)buf[i].rawTask, (unsigned)buf[i].task,
+                buf[i].sIndex, buf[i].sSerial);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
     // Jail put-to-work desync spike (KENSHICOOP_JAIL_PROBE, read-only): the
     // OWNED view of any captive body (the join's real, authoritative PC while it
     // is jailed). Correlate side=own here against side=drv from the host's
@@ -135,9 +208,15 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
     // Publish the SUBJECT under the key the peer streams it by (canonicalOf_,
     // stamped every drive tick) or the peer's applyCombat resolves nothing
     // (r=1 forever) and the fight renders on one client only.
+    // Assassinate (STEALTH_KNOCKOUT/STEALTH_KILL, 2026-08-16) shares the exact
+    // same failure mode: a live session's victim had been re-keyed on this
+    // client ([rekey] wire=7,3240478464 local=1,979492160 in the join's own
+    // log) and the raw local hand streamed straight through, so the host's
+    // applyTaskOrder resolved nothing (r=1 "fixture not loaded here") forever -
+    // same cause as the combat case above, same fix.
     for (unsigned int i = 0; i < n; ++i) {
         EntityState& e = buf[i];
-        if (!coop::taskIsCombat(e.task)) continue;
+        if (!coop::taskIsCombat(e.task) && !engine::isAssassinateTask((int)e.task)) continue;
         Character* tc = engine::resolveCharByHand(e.sIndex, e.sSerial, e.sType,
                                                   e.sContainer, e.sContainerSerial);
         if (!tc) continue;

@@ -1333,6 +1333,33 @@ struct ReportedDmg { float flesh; float blood; ReportedDmg() : flesh(0.0f), bloo
 std::map<Character*, ReportedDmg> g_reportedDmg;
 std::set<Character*>              g_reportAttackers;
 bool                              g_combatReport = false;
+std::map<Character*, float>       g_reportedKnockouts;
+bool                              g_suppressKnockoutReport = false;
+
+MedFloatFn g_knockoutOrig = 0;
+void __fastcall knockout_hook(MedicalSystem* self, float skill) {
+    Character* victim = 0;
+    if (g_combatReport && !g_suppressKnockoutReport) {
+        for (std::set<Character*>::iterator it = g_damageGuarded.begin();
+             it != g_damageGuarded.end(); ++it) {
+            if (&(*it)->medical == self) { victim = *it; break; }
+        }
+    }
+    g_knockoutOrig(self, skill);
+    if (victim) g_reportedKnockouts[victim] = skill;
+    // DIAGNOSTIC (2026-08-16, assassinate sync): this hook is the sole edge that
+    // reports a knockout to the host - if it never finds the victim in
+    // g_damageGuarded (e.g. the victim is a squad member, a class this guard set
+    // may not cover the same way it covers world-NPC copies), the result never
+    // crosses the wire regardless of whether the windup animation did. Always
+    // logs (cheap, one-shot per real knockout) so this is visible without
+    // needing KENSHICOOP_DEBUG_MARKERS.
+    { char b[160]; _snprintf(b, sizeof(b) - 1,
+        "[dmg] knockout_hook fired self=%p skill=%.2f report=%d suppress=%d victimFound=%d guarded=%u",
+        (void*)self, skill, g_combatReport ? 1 : 0, g_suppressKnockoutReport ? 1 : 0,
+        victim ? 1 : 0, (unsigned)g_damageGuarded.size());
+      b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
+}
 
 HitMaterialType __fastcall hitByMelee_hook(Character* self, CutDirection dir,
                                            Damages& damage, Character* who,
@@ -2259,6 +2286,13 @@ bool installDamageGuardHook() {
                               (void**)&g_hitByMeleeOrig) == KenshiLib::SUCCESS;
 }
 
+bool installKnockoutReportHook() {
+    intptr_t addr = KenshiLib::GetRealAddress(&MedicalSystem::knockout);
+    if (!addr) return false;
+    return KenshiLib::AddHook(addr, (void*)&knockout_hook,
+                              (void**)&g_knockoutOrig) == KenshiLib::SUCCESS;
+}
+
 bool installShopHook() {
     intptr_t addr = KenshiLib::GetRealAddress(&Inventory::buyItem);
     if (!addr) return false;
@@ -2723,7 +2757,10 @@ void damageGuardStats(unsigned long* outGuarded, unsigned long* outPassed) {
 
 void setCombatReport(bool on) {
     g_combatReport = on;
-    if (!on) g_reportedDmg.clear();
+    if (!on) {
+        g_reportedDmg.clear();
+        g_reportedKnockouts.clear();
+    }
 }
 void clearReportAttackers()          { g_reportAttackers.clear(); }
 void addReportAttacker(Character* c)  { if (c) g_reportAttackers.insert(c); }
@@ -2733,6 +2770,14 @@ bool takeReportedDamage(Character* c, float* outFlesh, float* outBlood) {
     if (outFlesh) *outFlesh = it->second.flesh;
     if (outBlood) *outBlood = it->second.blood;
     g_reportedDmg.erase(it);
+    return true;
+}
+
+bool takeReportedKnockout(Character* c, float* outSkill) {
+    std::map<Character*, float>::iterator it = g_reportedKnockouts.find(c);
+    if (it == g_reportedKnockouts.end()) return false;
+    if (outSkill) *outSkill = it->second;
+    g_reportedKnockouts.erase(it);
     return true;
 }
 

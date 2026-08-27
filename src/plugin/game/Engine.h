@@ -338,6 +338,9 @@ bool  markerAlive(void* label);
 // knockDown drops a Character into (on=true) / out of (on=false) full-body
 // ragdoll - the join calls it to reproduce a host-authoritative down edge.
 bool knockDown(Character* c, bool on);
+// Apply a real engine-calculated knockout without replacing its duration with
+// the short forced timer used by the down-state replication scaffold.
+bool applyKnockout(Character* c, float skill);
 // Maintain an already-down body each tick by topping the KO timer (no re-collapse).
 // Prevents the get-up/flop flicker without re-triggering the ragdoll fall. Join-side.
 bool holdDown(Character* c);
@@ -1233,6 +1236,24 @@ bool isNodeAnchoredPose(int taskKey);
 // maps before ordering the pose on the peer.
 bool isBuildSiteTask(int taskKey);
 
+// True if 'taskKey' is a silent takedown (STEALTH_KNOCKOUT / STEALTH_KILL) - the
+// assassinate windup/approach pose (2026-08-16 assassinate sync). Exposed so the
+// sync layer's diagnostics can classify a streamed rawTask without pulling in
+// kenshi/Enums.h.
+bool isAssassinateTask(int taskKey);
+
+// True if 'taskKey' is DOOR LOCK work - lockpicking (PICK_LOCK) or turning a key
+// (UNLOCK_DOOR / LOCK_DOOR and their _HERE / _PLAYER_ORDER forms) - the 2026-08-17
+// lockpick sync. The subject is the DOOR: a Building (DoorStuff) whose hand comes
+// out of the shared save, so unlike a seat there is no interchangeable prop to
+// mis-resolve to, and unlike a mine there is no runtime identity to translate.
+// Three consumers need it and none of them may include kenshi/Enums.h:
+//   * applyTask / applyTaskOrder - identity-trust the fixture (see below) and
+//     order it with dest=NULL (a door is not an interior destination).
+//   * the drive's rest/walk fork - a picking body is anchored, not walking.
+//   * the sync layer's diagnostics - classify a streamed task for the log.
+bool isDoorLockTask(int taskKey);
+
 // AI-gating probe lever: recruit a world NPC into the local player's squad (the
 // "inhabit" path) so it stops self-assigning town tasks and obeys our drive.
 // Join-side only. Returns the engine's recruit() result (false if unresolved).
@@ -1280,6 +1301,9 @@ void         setTaskSelectSpike(bool on);
 // Same pattern as the AI-suspend detour: pointer-compared set, rebuilt each tick
 // on the main thread, hook installed once.
 bool         installDamageGuardHook();
+// Join only: capture MedicalSystem::knockout calls on guarded world-NPC copies.
+// Assassinations bypass hitByMeleeAttack, so this is their combat-report edge.
+bool         installKnockoutReportHook();
 void         clearDamageGuard();
 void         addDamageGuard(Character* c);
 unsigned int damageGuardCount();
@@ -1302,6 +1326,7 @@ void         addReportAttacker(Character* c);
 // Drain the accumulated join-dealt damage for one victim copy (returns false if
 // nothing pending). flesh/blood are the summed deltas since the last drain.
 bool         takeReportedDamage(Character* c, float* outFlesh, float* outBlood);
+bool         takeReportedKnockout(Character* c, float* outSkill);
 
 // Read a character's current blood level by hand (medical.blood). The vitals
 // ground-truth read for the damage_guard conformance oracle: the HOST's victim

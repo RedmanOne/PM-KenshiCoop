@@ -346,6 +346,19 @@ void Replicator::applyTargets(GameWorld* gw) {
         // 2026-07-17, ~4/5 tries; the 1/5 that worked caught cMoving==0). A
         // bedded body is never walking: anchor it so the rest/pose path runs.
         if (engine::taskIsBedPose((int)out.task)) hostMoving = false;
+        // Door lock work (2026-08-17 lockpick sync) is the same shape of anchored
+        // action: the body stands at the door and works the lock, and if its
+        // currentlyMoving flag is set by the pick clip the way the bed clip sets it
+        // above, hostMoving routes it down the walk/snap path and applyRest - the
+        // only thing that reproduces the pose - never runs. Unlike a bed, though, a
+        // picker DOES walk: the order is issued (and so the task is captured) while
+        // the body is still crossing the street to the door, and anchoring it there
+        // would hand the walk to the peer's own local pathing instead of the
+        // streamed transform. So distrust only the FLAG, and keep the speed: this is
+        // a no-op whenever cMoving is honest, and it is what lets a picker that is
+        // genuinely standing still be posed.
+        if (engine::isDoorLockTask((int)out.task) && out.cSpeed <= MOVE_EPS)
+            hostMoving = false;
 
         // Two drive regimes (see Engine::isLocalPlayerChar):
         //   * SQUAD member - a player-controlled body, inert when uncontrolled, so
@@ -364,10 +377,16 @@ void Replicator::applyTargets(GameWorld* gw) {
         // still drain it so the engine-side accumulator stays bounded.
         if (reportCombat_) {
             float rf = 0.0f, rb = 0.0f;
-            if (engine::takeReportedDamage(c, &rf, &rb) && !isSquad &&
-                (rf > 0.0f || rb > 0.0f)) {
+            bool haveDamage = engine::takeReportedDamage(c, &rf, &rb);
+            float koSkill = 1.0f;
+            bool knockout = engine::takeReportedKnockout(c, &koSkill);
+            if (!isSquad && ((haveDamage && (rf > 0.0f || rb > 0.0f)) || knockout)) {
                 PendingHit& ph = pendingHits_[it->first];
                 ph.flesh += rf; ph.blood += rb;
+                if (knockout) {
+                    ph.knockout = true;
+                    ph.knockoutSkill = koSkill;
+                }
             }
         }
 
@@ -848,6 +867,22 @@ void Replicator::applyTargets(GameWorld* gw) {
         if (d.downApplied) {
             engine::knockDown(c, false); // host says upright again -> stand back up
             d.downApplied = false;
+            // The engine destroys the physics/render character on collapse and
+            // re-creates it when the body's OWN AI stands it back up. This driven
+            // copy is AI-suspended the whole time it's down (it never runs that
+            // recovery itself), so releasing the ragdoll alone leaves it without
+            // one: CharMovement::pos (getPosition, the nametag, every position
+            // oracle) keeps tracking the host normally, but the rendered mesh has
+            // no controller to move it and stays frozen at the collapse spot -
+            // "gets up on the host but the model stays put on the peer" (first
+            // found and fixed the same way on the crawl path, protocol 53's
+            // CRAWL-PHYS restore below; a full stand-up revive hits the identical
+            // gap, just without the crippled/crawling condition that path gates on).
+            if (!engine::hasPhysicsBody(c) && engine::restoreMovement(c)) {
+                char b[160]; _snprintf(b, sizeof(b) - 1,
+                    "[revive] PHYS-RESTORE hand=%u,%u", out.hIndex, out.hSerial);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
         }
 
         // ---- Stealth posture (protocol 20) -------------------------------------
@@ -903,6 +938,28 @@ void Replicator::applyTargets(GameWorld* gw) {
                     "[prone] APPLY hand=%u,%u want=%u was=%d ok=%d",
                     out.hIndex, out.hSerial, (unsigned)want, local, ok ? 1 : 0);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                // Stuck-KO recovery (2026-08-16, dust-bandit fight desync). This
+                // block's own comment above assumes PS_KO/PS_PLAYING_DEAD are the
+                // down path's property, caught by bodyIsDown(out.bodyState) before
+                // execution ever reaches here - but a driven copy's LOCAL physics/
+                // collapse state can enter PS_KO on its own, independent of what
+                // the owner streams. Measured live: the owner streamed upright
+                // (want=0) the entire time while this copy read local=4 (PS_KO)
+                // continuously for 3+ minutes - applyProneState "succeeded" on
+                // every ~1 Hz retry but never stuck, because a bare setProneState
+                // does not release the underlying collapse (the same destroyed-
+                // physics-body gap the down path's stand-up revive handles via
+                // knockDown(false) + hasPhysicsBody/restoreMovement, PHYS-RESTORE
+                // above). Run that same recovery here so a copy that fell into
+                // PS_KO off-stream isn't left fighting the apply forever.
+                if (local == PRONE_KO || local == PRONE_PLAYING_DEAD) {
+                    engine::knockDown(c, false);
+                    if (!engine::hasPhysicsBody(c) && engine::restoreMovement(c)) {
+                        char rb[128]; _snprintf(rb, sizeof(rb) - 1,
+                            "[revive] PHYS-RESTORE hand=%u,%u", out.hIndex, out.hSerial);
+                        rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+                    }
+                }
             }
         }
 
@@ -1145,6 +1202,56 @@ void Replicator::applyTargets(GameWorld* gw) {
                     // exits combat doesn't inherit a stale combat destination).
                     d.haveDest = false;
                 }
+            }
+            d.parked = false;
+            if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
+            continue;
+        }
+        // ---- Assassinate override (silent-takedown windup, 2026-08-16) --------
+        // STEALTH_KNOCKOUT/STEALTH_KILL is a walk-up-and-strike action like melee
+        // combat above, NOT a stationary rest pose: the attacker is still MOVING
+        // right up to the takedown. applyRest's "genuinely moving" gate (below,
+        // the ordinary walk/rest fork) never releases while that's true, so the
+        // task-order apply added for this never actually fired - the copy just
+        // rode the plain position-drive the whole time and the windup never
+        // reproduced (confirmed via a live session: host log showed the raw task
+        // captured correctly but no matching applyOrder call, while the driven
+        // copy visibly just walked in place). Fix: give it the same early,
+        // movement-independent apply as combat, reusing the combat episode
+        // fields (mutually exclusive task values, so no collision) - one-shot,
+        // no slot-rotation/backoff needed, just (re-)issue once per target and
+        // let the local engine own the walk-in + strike. The shared hold/disarm
+        // block right below then releases it back to ordinary drive once the
+        // host stops streaming the task.
+        if (engine::isAssassinateTask((int)out.task)) {
+            if (!isSquad && !d.detached) d.detached = engine::detachFromTownAI(c);
+            bool tgtChanged = d.combatArmed &&
+                (d.combatTgtIdx != out.sIndex || d.combatTgtSer != out.sSerial);
+            // Retry on a NON-success return (r=1 fixture-not-loaded-here is common
+            // right when the victim's stream first arrives - the local resolve can
+            // lag a tick or two): only a genuine r=2 latches combatArmed, so a
+            // failure keeps retrying (throttled, not every tick) instead of
+            // silently giving up after one failed attempt forever (2026-08-16 live
+            // session: the first order landed r=1 and, with the old unconditional
+            // latch, was never retried).
+            bool retryDue = !d.combatArmed &&
+                (d.combatTick == 0 || (now - d.combatTick) >= 250);
+            if (tgtChanged || retryDue) {
+                int r = engine::applyTaskOrder(c, out);
+                d.combatArmed = (r == 2);
+                d.combatTick = now; d.combatSeenTick = now;
+                d.combatTgtIdx = out.sIndex; d.combatTgtSer = out.sSerial;
+                if (d.combatOrders < 1000000u) ++d.combatOrders;
+                char b[176]; _snprintf(b, sizeof(b) - 1,
+                    "[assassinate] APPLY hand=%u,%u tgt=%u,%u task=%u r=%d n=%u",
+                    out.hIndex, out.hSerial, out.sIndex, out.sSerial,
+                    (unsigned)out.task, r, d.combatOrders);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                char tag[24]; _snprintf(tag, sizeof(tag) - 1, "ASSASSINATE-RX r%d", r);
+                tag[sizeof(tag) - 1] = '\0';
+                debugMark(c, r == 2 ? 0 : 1, tag);
+            } else {
+                d.combatSeenTick = now; // still in progress: feed the hold debounce
             }
             d.parked = false;
             if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
@@ -2298,6 +2405,37 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
                 out.sIndex, out.sSerial, d.detached ? 1 : 0, r,
                 d.taskRetries);
               b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
+            // NOTE: assassinate tasks (STEALTH_KNOCKOUT/STEALTH_KILL) no longer
+            // reach this branch - the movement-independent block above catches
+            // them before the walk/rest fork, since applyRest only runs once a
+            // body is classified at rest and an approaching attacker never is.
+            //
+            // Door lock work (2026-08-17 lockpick sync) DOES belong here: unlike a
+            // takedown it is a long STATIONARY action at a fixture, so it reaches
+            // the rest path the same way sitting and mining do. Logged under its
+            // own tag (unconditionally - a player watches this happen) because the
+            // failure modes are worth telling apart at a glance: r=1 means the door
+            // did not resolve here, which is the known limit for a door on a
+            // session-PLACED building (its runtime hand only exists on the placer;
+            // baked doors come out of the shared save and resolve fine).
+            //
+            // On the RESULT: the peer's copy runs the engine's own pick, so the lock
+            // has two authors. That is safe here in a way pitfall 16's wallet is not
+            // - a lock is an idempotent latch and both authors drive it to the SAME
+            // value (unlocked), so the two sides converge instead of erasing each
+            // other; protocol 26 then carries whichever engine got there first to
+            // the other. The cost is only that a contested lock opens on the earlier
+            // of two rolls.
+            if (engine::isDoorLockTask((int)out.task)) {
+                char b[192]; _snprintf(b, sizeof(b) - 1,
+                    "[lockpick] APPLY hand=%u,%u door=%u,%u task=%u r=%d try=%u",
+                    out.hIndex, out.hSerial, posed->sIndex, posed->sSerial,
+                    (unsigned)out.task, r, d.taskRetries);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                char tag[24]; _snprintf(tag, sizeof(tag) - 1, "LOCKPICK-RX r%d", r);
+                tag[sizeof(tag) - 1] = '\0';
+                debugMark(c, r == 2 ? 0 : 1, tag);
+            }
             if (r == 2) { d.taskApplied = true; d.taskRetries = 0; } // posed at the fixture
             else if (r == 1) d.taskBad = true; // fixture not loaded here -> park
             else if (r == 3) {

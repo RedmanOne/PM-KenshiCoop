@@ -93,7 +93,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(MedPartEntry)",            sizeof(MedPartEntry),            19);
     CHECK_EQ("sizeof(MedicalPacket)",           sizeof(MedicalPacket),           467);
     CHECK_EQ("sizeof(TreatmentPacket)",         sizeof(TreatmentPacket),         77);
-    CHECK_EQ("sizeof(CombatHitPacket)",         sizeof(CombatHitPacket),         37);
+    CHECK_EQ("sizeof(CombatHitPacket)",         sizeof(CombatHitPacket),         42);
     CHECK_EQ("sizeof(SpeedPacket)",             sizeof(SpeedPacket),             14);
     CHECK_EQ("sizeof(StatsPacket)",             sizeof(StatsPacket),             194);
     CHECK_EQ("sizeof(StealthPacket)",           sizeof(StealthPacket),           427);
@@ -313,8 +313,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v58: inventory save fence)",
-             (int)PROTOCOL_VERSION, 58);
+    CHECK_EQ("PROTOCOL_VERSION (v59: knockout outcome on a combat-hit report)",
+             (int)PROTOCOL_VERSION, 59);
     CHECK_EQ("inventory save fence packet id", (int)PKT_INV_SAVE_FENCE, 50);
     CHECK("PKT_INV_SAVE_FENCE distinct", PKT_INV_SAVE_FENCE != PKT_NATIVE_TAKEN && PKT_INV_SAVE_FENCE != PKT_FIXTURE);
     {
@@ -460,6 +460,9 @@ static void testSizes() {
     // A claim batch is capped by the u8 count; even a full one must fit a datagram.
     CHECK("full world-item claim fits datagram",
           sizeof(WorldItemClaimHeader) + 255 * sizeof(u32) <= 1400);
+
+    // Knockout-outcome flag on a join-dealt combat hit report (protocol 59).
+    CHECK_EQ("COMBAT_HIT_KNOCKOUT flag", (int)COMBAT_HIT_KNOCKOUT, 1);
 }
 
 // ---- 2. readPacket / packetType round-trips -----------------------------------
@@ -1241,6 +1244,15 @@ static void testWorkPoseMatch() {
     // still accepted, exactly like a work fixture; a seat at the same range is not.
     CHECK("medic 12 m accepted (identity-trusted)",  poseFixtureAccepted(true,  12.0f));
     CHECK("medic 12 m rejected as seat",            !poseFixtureAccepted(false, 12.0f));
+
+    // Lockpick sync (2026-08-17): a door-lock subject is the DOOR, a unique
+    // SAVE-BAKED building - the work-fixture argument, so it is identity-trusted
+    // too. The distance that forces this is a town GATE, whose origin can sit well
+    // away from the spot its lock is worked from; gating that on the seat radius
+    // would reject the correct gate and park the picker with no animation, which is
+    // the mining bug in a different costume.
+    CHECK("gate 20 m accepted (identity-trusted)",  poseFixtureAccepted(true,  20.0f));
+    CHECK("gate 20 m rejected as seat",            !poseFixtureAccepted(false, 20.0f));
 
     // Seat still tight: a fixture right under the body is accepted, a far stool not.
     CHECK("seat 3 m accepted",   poseFixtureAccepted(false, 3.0f));
